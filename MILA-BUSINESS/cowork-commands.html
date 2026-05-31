@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Cowork · Команды MILA</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <style>* { box-sizing: border-box; margin: 0; padding: 0; } body { background: #F9F6F0; }</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState } = React;
+
+const TERRA  = '#C46148';
+const NIGHT  = '#2C1A12';
+const WHITE  = '#FFFFFF';
+const CREAM  = '#F9F6F0';
+const BORDER = '#E8DDD8';
+const MUTED  = '#7A5E54';
+const MIST   = '#F4EDE5';
+const GREEN  = '#5A7A64';
+
+const sequences = [
+  {
+    id: 'setup',
+    icon: '⚙️',
+    title: 'Шаг 1 — Первичная настройка',
+    subtitle: 'Один раз, перед началом',
+    color: NIGHT,
+    description: 'Настрой рабочую среду: папки, файлы, первый контент-план. После этого шага всё остальное работает автоматически.',
+    commands: [
+      {
+        label: 'Создать контент-план на неделю',
+        prompt: `Создай контент-план на следующие 7 дней для Instagram @liudmyla.lykova.
+
+Ниша: психология отношений, русскоязычные женщины, тревожная привязанность.
+Метод автора: «Точки выбора» (Спасатель / Угодница / Избегание).
+
+Для каждого дня:
+- Тема поста
+- Формат (карусель / одно фото / Reel / сторис)
+- Ключевая мысль (1 предложение)
+- Хэштеги (5–7 штук)
+
+Пятница — обязательно оффер: практикум или диагностика.
+Воскресенье — личная история / инсайт от Людмилы.
+
+Сохрани как MILA-BUSINESS/02-content/content-plan.md`,
+        note: 'Запусти один раз — потом обновляй каждый понедельник'
+      },
+      {
+        label: 'Перенести практикум в рабочую папку',
+        prompt: `В папке MILA-BUSINESS/01-praktikum/ должны лежать оба PDF:
+- praktikum_v4_final.pdf (оригинал)
+- praktikum_исправленный.pdf (с правками редактора)
+
+Проверь что файлы на месте. Если нет — сообщи какие именно отсутствуют.
+
+Затем создай файл MILA-BUSINESS/01-praktikum/versions.txt со списком версий:
+v4_final — исходник от дизайнера
+v4_edited — редакторские правки (орфография, структура, 7-дневные практики)
+Дата последнего обновления: [сегодняшняя дата]`,
+        note: 'Убедись что оба PDF загружены в папку'
+      },
+      {
+        label: 'Написать описание продукта для Gumroad',
+        prompt: `Напиши полное описание продукта для Gumroad.
+
+Продукт: PDF рабочая тетрадь «Почему я снова выбрала не того»
+Автор: Людмила Лыкова, психолог, Канада
+Цена: $37 CAD
+Язык: русский
+Объём: 36 страниц, 4 шага, 5 упражнений
+
+Структура описания:
+1. Заголовок (цепляющий, с болью аудитории)
+2. Для кого этот практикум (3–4 пункта)
+3. Что внутри (4 шага трансформации)
+4. Что получит покупательница (конкретные результаты)
+5. Об авторе (2–3 предложения)
+6. CTA: кнопка «Получить практикум»
+
+Без HTML-тегов. Готово к копированию в Gumroad.
+Сохрани как MILA-BUSINESS/01-praktikum/gumroad_description.txt`,
+        note: 'Потом вставь текст в Gumroad → Edit product → Description'
+      }
+    ]
+  },
+  {
+    id: 'content',
+    icon: '✍️',
+    title: 'Шаг 2 — Еженедельный контент',
+    subtitle: 'Каждый понедельник ~15 минут',
+    color: TERRA,
+    description: 'Один раз в неделю Cowork пишет все посты, сторис и подписи к Reels.',
+    commands: [
+      {
+        label: 'Написать все посты недели',
+        prompt: `В папке MILA-BUSINESS/02-content/ есть файл content-plan.md с темами на неделю.
+
+Напиши 5 постов для Instagram — по одному на каждый день.
+
+Стиль: тёплый, психологичный, без жаргона. Как близкая подруга-эксперт.
+Тон: русский язык, обращение на «ты».
+Автор: Людмила Лыкова, психолог и коуч, Канада.
+Ниша: женщины в болезненных отношениях, тревожная привязанность.
+
+Каждый пост заканчивается вопросом к аудитории или призывом написать «ХОЧУ».
+
+Сохрани каждый пост отдельным файлом: post_пн.txt, post_вт.txt и т.д.
+в папку MILA-BUSINESS/02-content/posts/`,
+        note: 'Добавь в папку свой content-plan.md перед запуском'
+      },
+      {
+        label: 'Написать сторис на неделю',
+        prompt: `Напиши 5 комплектов Instagram Stories — по 3-5 сторис в каждом.
+
+Один комплект = один день недели.
+
+Формат каждой сторис:
+[ФОН: описание цвета или фото]
+[ТЕКСТ: что написать крупно]
+[СТИКЕР: если нужен опрос/ссылка/реакция]
+
+Стиль: личный, тёплый, доверительный.
+Пятница — всегда оффер: «2-3 места на диагностику».
+
+Сохрани в MILA-BUSINESS/02-content/stories/week_XX.md`,
+        note: 'Замени XX на номер недели'
+      },
+      {
+        label: 'Сценарий Reel',
+        prompt: `Напиши сценарий для Reel по теме: [ВСТАВЬ ТЕМУ]
+
+Структура:
+- Хук (0-3 сек): провокационное утверждение или вопрос
+- Проблема (3-15 сек): боль аудитории
+- Объяснение (15-40 сек): психологический инсайт
+- Практика (40-55 сек): один простой шаг
+- CTA (55-60 сек): призыв к действию
+
+Автор: Людмила Лыкова, психолог, говорит в камеру.
+Язык: русский, живой, без академизма.
+Финал: «Ссылка в bio» или «Напиши ХОЧУ».
+
+Сохрани в MILA-BUSINESS/02-content/reels/`,
+        note: 'Замени [ВСТАВЬ ТЕМУ] на тему из контент-плана'
+      }
+    ]
+  },
+  {
+    id: 'clients',
+    icon: '👩',
+    title: 'Шаг 3 — Работа с клиентами',
+    subtitle: 'Перед каждой сессией',
+    color: GREEN,
+    description: 'Cowork обрабатывает анкеты и помогает готовиться к сессиям.',
+    commands: [
+      {
+        label: 'Обработать анкету новой клиентки',
+        prompt: `В папке MILA-BUSINESS/03-clients/intake-forms/ лежит анкета новой клиентки.
+
+Создай документ подготовки к первой сессии:
+
+1. Краткий профиль клиентки (3-4 предложения)
+2. Вероятный паттерн по методологии «Точки выбора» (Спасатель/Угодница/Избегание)
+3. Ключевые темы для первой сессии (3-5 пунктов)
+4. Вопросы для диагностики (5-7 открытых вопросов)
+5. На что обратить внимание (красные флаги или ресурсы)
+
+Сохрани как: YYYY-MM-DD_имя_prep.docx`,
+        note: 'Положи анкету в папку перед запуском'
+      },
+      {
+        label: 'Сводка после сессии',
+        prompt: `В папке MILA-BUSINESS/03-clients/session-notes/ лежат мои заметки после сессии.
+
+Создай структурированный документ:
+
+1. Основные инсайты клиентки за эту сессию
+2. Прогресс по сравнению с прошлой сессией
+3. Домашнее задание которое дала
+4. Темы для следующей сессии
+5. Мои наблюдения как терапевта (что заметила в динамике)
+
+Стиль: профессиональный, конфиденциальный.
+Сохрани рядом с заметками как: [дата]_summary.docx`,
+        note: 'Напиши заметки голосом или текстом — Cowork структурирует'
+      },
+      {
+        label: 'Ответить на DM в Instagram',
+        prompt: `Вот сообщения из Instagram Direct которые мне пришли:
+[ВСТАВЬ ТЕКСТ СООБЩЕНИЙ]
+
+Напиши ответы:
+- Тёплые, личные, без шаблонности
+- Для тех кто написал «ХОЧУ» — пригласи на диагностику
+- Для тех кто задаёт вопрос — дай короткий инсайт + направь на практикум или диагностику
+- Максимум 3-4 предложения каждый ответ
+
+Сохрани как draft_dm_ответы.txt`,
+        note: 'Скопируй DM из Instagram перед запуском'
+      }
+    ]
+  },
+  {
+    id: 'analytics',
+    icon: '📊',
+    title: 'Шаг 4 — Аналитика',
+    subtitle: 'Раз в месяц',
+    color: MUTED,
+    description: 'Анализ что работает и что улучшить.',
+    commands: [
+      {
+        label: 'Анализ контента за месяц',
+        prompt: `В папке MILA-BUSINESS/05-analytics/ лежит файл с данными Instagram за месяц.
+
+Проанализируй:
+1. Какие посты получили больше всего охватов/сохранений
+2. Какие темы лучше резонируют с аудиторией
+3. В какие дни и время лучше публиковать
+4. Что советуешь делать больше — что меньше
+5. Прогноз: если делать 4 Reel в месяц на лучшие темы — какой результат
+
+Создай отчёт analytics_[месяц].docx с выводами и рекомендациями на следующий месяц.`,
+        note: 'Экспортируй статистику из Instagram перед запуском'
+      },
+      {
+        label: 'Финансовый отчёт',
+        prompt: `В папке MILA-BUSINESS/05-analytics/ есть файл с продажами и консультациями за месяц.
+
+Создай таблицу и краткий отчёт:
+- Доход от практикума (кол-во продаж × цена)
+- Доход от консультаций (кол-во сессий × тариф)
+- Итого CAD
+- Сравнение с прошлым месяцем
+- Прогноз на следующий месяц при текущем темпе
+
+Сохрани как Excel и как краткое резюме в .txt`,
+        note: 'Данные из Gumroad + личные записи'
+      }
+    ]
+  },
+  {
+    id: 'launch',
+    icon: '🚀',
+    title: 'Шаг 5 — Запуск прямо сейчас',
+    subtitle: 'Сегодня — первые три задачи',
+    color: TERRA,
+    description: 'Начни с этих трёх команд — они самые срочные.',
+    commands: [
+      {
+        label: '🔴 СЕЙЧАС: Подготовить Gumroad',
+        prompt: `Открой файл MILA-BUSINESS/01-praktikum/gumroad_description.txt
+
+Извлеки из него:
+1. Заголовок продукта
+2. Описание (первые 300 символов)
+3. Список из 4 шагов трансформации
+4. Раздел «для кого»
+
+Отформатируй всё как текст для страницы Gumroad — без HTML тегов, с абзацами, готовый к копированию.
+
+Сохрани как gumroad_final.txt`,
+        note: '⚡ Запустить первым'
+      },
+      {
+        label: '🔴 СЕЙЧАС: Написать 7 сторис для запуска',
+        prompt: `Напиши 7 Instagram Stories для запуска практикума «Почему я снова выбрала не того».
+
+Автор: Людмила Лыкова, психолог, Канада, @liudmyla.lykova.
+
+Логика:
+Story 1 — интрига («я написала кое-что»)
+Story 2 — боль аудитории (3 вопроса которые она задаёт себе)
+Story 3 — тизер (что внутри практикума, без спойлеров)
+Story 4 — личная история Людмилы (коротко: буллинг → эмиграция → депрессия → трансформация)
+Story 5 — что получит читательница (4 шага)
+Story 6 — цена $37 CAD первые 48 часов
+Story 7 — последний шанс + ссылка
+
+Каждая сторис = текст + рекомендация по фону.
+Сохрани в MILA-BUSINESS/02-content/stories/launch_today.txt`,
+        note: '⚡ Запустить вторым'
+      },
+      {
+        label: '🔴 СЕЙЧАС: Обновить шапку Instagram',
+        prompt: `Напиши 3 варианта шапки профиля Instagram для @liudmyla.lykova.
+
+Требования:
+- Максимум 150 символов
+- Сразу понятно кто и кому помогает
+- Есть чёткий призыв к действию
+- На русском языке
+- Не использовать слово «коуч» как главное
+
+Контекст:
+Людмила Лыкова — психолог, Канада.
+Помогает русскоязычным женщинам выйти из болезненных паттернов в отношениях.
+Метод: «Точки выбора».
+Продукт: PDF практикум $37 CAD.
+
+Сохрани варианты в MILA-BUSINESS/bio_variants.txt`,
+        note: '⚡ Запустить третьим'
+      }
+    ]
+  }
+];
+
+function CopyBtn({ text }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      onClick={() => {
+        navigator.clipboard.writeText(text);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+      }}
+      style={{
+        background: copied ? GREEN : TERRA,
+        color: WHITE, border: 'none',
+        borderRadius: 8, padding: '7px 14px',
+        fontSize: 11, cursor: 'pointer',
+        transition: 'background 0.2s',
+        flexShrink: 0, whiteSpace: 'nowrap',
+        fontFamily: 'Georgia, serif'
+      }}
+    >{copied ? '✓ Скопировано' : 'Скопировать'}</button>
+  );
+}
+
+function App() {
+  const [open, setOpen] = useState({ setup: true });
+  const toggle = (id) => setOpen(prev => ({ ...prev, [id]: !prev[id] }));
+
+  return (
+    <div style={{ fontFamily: 'Georgia, serif', background: CREAM, minHeight: '100vh' }}>
+
+      {/* Header */}
+      <div style={{ background: NIGHT, padding: '36px 24px 44px' }}>
+        <div style={{ maxWidth: 760, margin: '0 auto' }}>
+          <div style={{ fontSize: 10, color: TERRA, letterSpacing: 3, marginBottom: 12 }}>
+            COWORK · ПОСЛЕДОВАТЕЛЬНОСТЬ КОМАНД
+          </div>
+          <div style={{ fontSize: 34, color: WHITE, fontWeight: 400, lineHeight: 1.15, marginBottom: 10 }}>
+            Что говорить Cowork<br/>
+            <span style={{ fontStyle: 'italic', color: '#edd5cc' }}>для этого проекта</span>
+          </div>
+          <div style={{ fontSize: 12, color: '#5a3a2e' }}>
+            @liudmyla.lykova · 5 блоков · 14 готовых команд
+          </div>
+
+          {/* Quick start */}
+          <div style={{
+            marginTop: 20, background: TERRA, borderRadius: 12,
+            padding: '14px 18px', display: 'flex', gap: 14, alignItems: 'center'
+          }}>
+            <div style={{ fontSize: 28 }}>⚡</div>
+            <div>
+              <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.7)', marginBottom: 3 }}>
+                НАЧНИ ПРЯМО СЕЙЧАС
+              </div>
+              <div style={{ fontSize: 14, color: WHITE, fontWeight: 600 }}>
+                Шаг 5 → три красных команды → сегодня можно запускать
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div style={{ maxWidth: 760, margin: '0 auto', padding: '28px 20px 80px' }}>
+
+        {/* How to use */}
+        <div style={{
+          background: WHITE, border: `1px solid ${BORDER}`,
+          borderRadius: 14, padding: '18px 20px', marginBottom: 20
+        }}>
+          <div style={{ fontSize: 12, color: TERRA, letterSpacing: 2, marginBottom: 10 }}>
+            КАК ИСПОЛЬЗОВАТЬ
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+            {[
+              ['1', 'Открыть Claude Desktop'],
+              ['2', 'Нажать «Start a task in Cowork»'],
+              ['3', 'Дать доступ к папке MILA-BUSINESS'],
+              ['4', 'Скопировать команду → вставить → Enter'],
+            ].map(([n, t]) => (
+              <div key={n} style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+                <div style={{
+                  width: 22, height: 22, background: TERRA, borderRadius: '50%',
+                  color: WHITE, fontSize: 11, fontWeight: 700,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0
+                }}>{n}</div>
+                <div style={{ fontSize: 13, color: MUTED, lineHeight: 1.5 }}>{t}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Sequences */}
+        {sequences.map(seq => (
+          <div key={seq.id} style={{ marginBottom: 12 }}>
+            <div
+              onClick={() => toggle(seq.id)}
+              style={{
+                background: seq.color,
+                borderRadius: open[seq.id] ? '14px 14px 0 0' : 14,
+                padding: '16px 20px', cursor: 'pointer',
+                display: 'flex', justifyContent: 'space-between', alignItems: 'center'
+              }}
+            >
+              <div style={{ display: 'flex', gap: 14, alignItems: 'center' }}>
+                <span style={{ fontSize: 24 }}>{seq.icon}</span>
+                <div>
+                  <div style={{ fontSize: 16, color: WHITE, fontWeight: 600 }}>{seq.title}</div>
+                  <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.6)', marginTop: 2, letterSpacing: 0.5 }}>
+                    {seq.subtitle}
+                  </div>
+                </div>
+              </div>
+              <div style={{ fontSize: 20, color: 'rgba(255,255,255,0.6)' }}>
+                {open[seq.id] ? '−' : '+'}
+              </div>
+            </div>
+
+            {open[seq.id] && (
+              <div style={{
+                background: WHITE, border: `1px solid ${BORDER}`,
+                borderTop: 'none', borderRadius: '0 0 14px 14px', padding: '0 20px 20px'
+              }}>
+                <div style={{
+                  padding: '14px 0 4px', fontSize: 13, color: MUTED,
+                  lineHeight: 1.6, borderBottom: `1px solid ${BORDER}`, marginBottom: 16
+                }}>
+                  {seq.description}
+                </div>
+
+                {seq.commands.map((cmd, i) => (
+                  <div key={i} style={{
+                    background: '#FAFAF8', border: `1px solid ${BORDER}`,
+                    borderRadius: 12, marginBottom: 12, overflow: 'hidden'
+                  }}>
+                    <div style={{
+                      padding: '12px 16px',
+                      background: cmd.label.includes('🔴') ? 'rgba(196,97,74,0.08)' : MIST,
+                      display: 'flex', justifyContent: 'space-between',
+                      alignItems: 'center', gap: 12
+                    }}>
+                      <div style={{ fontSize: 14, fontWeight: 600, color: NIGHT }}>
+                        {cmd.label}
+                      </div>
+                      <CopyBtn text={cmd.prompt} />
+                    </div>
+
+                    <div style={{ padding: '14px 16px' }}>
+                      <pre style={{
+                        fontSize: 12, color: '#3a2a24', lineHeight: 1.8,
+                        whiteSpace: 'pre-wrap', margin: 0,
+                        fontFamily: 'Georgia, serif', background: 'none'
+                      }}>{cmd.prompt}</pre>
+                    </div>
+
+                    {cmd.note && (
+                      <div style={{
+                        padding: '8px 16px',
+                        background: seq.color === TERRA
+                          ? 'rgba(196,97,74,0.06)'
+                          : 'rgba(26,15,10,0.04)',
+                        borderTop: `1px dashed ${BORDER}`
+                      }}>
+                        <span style={{ fontSize: 11, color: TERRA }}>💡 </span>
+                        <span style={{ fontSize: 11, color: MUTED }}>{cmd.note}</span>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        ))}
+
+        {/* Footer tip */}
+        <div style={{ background: NIGHT, borderRadius: 14, padding: '20px 22px', marginTop: 8 }}>
+          <div style={{ fontSize: 10, color: TERRA, letterSpacing: 2, marginBottom: 10 }}>СОВЕТ</div>
+          <div style={{ fontSize: 13, color: '#c0a898', lineHeight: 1.8 }}>
+            Cowork помнит контекст в рамках одной задачи. Для новых задач — новый чат в Cowork.
+            Чем точнее папка, тем лучше результат. Начни с папки{' '}
+            <b style={{ color: WHITE }}>MILA-BUSINESS</b> и давай доступ только к ней.
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
