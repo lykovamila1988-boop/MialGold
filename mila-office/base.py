@@ -53,7 +53,7 @@ ANTHROPIC_BASE_URL   = os.getenv("ANTHROPIC_BASE_URL")  # напр. URL gateway/
 MODEL         = os.getenv("MILA_MODEL", "claude-opus-4-6")
 GEMINI_MODEL  = os.getenv("MILA_GEMINI_MODEL", "gemini-2.5-flash")
 MAX_TOKENS    = int(os.getenv("MILA_MAX_TOKENS", "2048"))
-LLM_PROVIDER  = (os.getenv("MILA_LLM_PROVIDER") or ("gemini" if GEMINI_KEY else "anthropic")).lower()
+LLM_PROVIDER  = (os.getenv("MILA_LLM_PROVIDER") or "gemini").lower()
 ANTHROPIC_AGENT_KEYS = {
     k.strip().lower()
     for k in os.getenv("MILA_ANTHROPIC_AGENTS", "manager,producer").split(",")
@@ -306,7 +306,7 @@ def provider_for_agent(agent_key: str | None = None) -> str:
     if provider in ("anthropic", "claude"):
         return "anthropic"
     if provider in ("gemini", "google"):
-        if key in ANTHROPIC_AGENT_KEYS and _anthropic_configured():
+        if key in ANTHROPIC_AGENT_KEYS:
             return "anthropic"
         return "gemini"
     if key in ANTHROPIC_AGENT_KEYS and _anthropic_configured():
@@ -439,10 +439,6 @@ def run_agent(client, system: str, tools: list, tool_handler, user_message: str,
     history.append({"role": "user", "content": user_message})
     messages = history.copy()
     provider = provider_for_agent(agent_key)
-    if provider == "anthropic" and not _anthropic_configured() and GEMINI_KEY:
-        provider = "gemini"
-    if provider == "gemini" and not GEMINI_KEY and _anthropic_configured():
-        provider = "anthropic"
     if provider == "gemini":
         return _run_gemini_agent(system, tools, tool_handler, messages, history)
     return _run_anthropic_agent(client, system, tools, tool_handler, messages, history)

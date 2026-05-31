@@ -75,10 +75,15 @@ def test_provider_defaults_to_gemini_when_key_present(monkeypatch, tmp_path):
     assert base.get_client() is None
 
 
-def test_anthropic_agent_override_when_configured(monkeypatch, tmp_path):
+def test_provider_defaults_to_gemini_even_without_key(monkeypatch, tmp_path):
+    base = _fresh_base(monkeypatch, tmp_path, {})
+    assert base.LLM_PROVIDER == "gemini"
+    assert base.provider_for_agent("marina") == "gemini"
+
+
+def test_anthropic_agent_override_is_not_a_fallback(monkeypatch, tmp_path):
     base = _fresh_base(monkeypatch, tmp_path, {
         "GEMINI_KEY": "gemini-key",
-        "ANTHROPIC_API_KEY": "anthropic-key",
         "MILA_ANTHROPIC_AGENTS": "manager",
     })
     assert base.provider_for_agent("manager") == "anthropic"
@@ -94,7 +99,10 @@ def _capture_client(monkeypatch, base):
 
 
 def test_get_client_uses_api_key_by_default(monkeypatch, tmp_path):
-    base = _fresh_base(monkeypatch, tmp_path, {"ANTHROPIC_API_KEY": "k-123"})
+    base = _fresh_base(monkeypatch, tmp_path, {
+        "ANTHROPIC_API_KEY": "k-123",
+        "MILA_LLM_PROVIDER": "anthropic",
+    })
     cap = _capture_client(monkeypatch, base)
     base.get_client()
     assert cap.get("api_key") == "k-123"
@@ -102,7 +110,10 @@ def test_get_client_uses_api_key_by_default(monkeypatch, tmp_path):
 
 
 def test_get_client_uses_auth_token_when_set(monkeypatch, tmp_path):
-    base = _fresh_base(monkeypatch, tmp_path, {"ANTHROPIC_AUTH_TOKEN": "bearer-xyz"})
+    base = _fresh_base(monkeypatch, tmp_path, {
+        "ANTHROPIC_AUTH_TOKEN": "bearer-xyz",
+        "MILA_LLM_PROVIDER": "anthropic",
+    })
     cap = _capture_client(monkeypatch, base)
     base.get_client()
     assert cap.get("auth_token") == "bearer-xyz"
@@ -111,7 +122,10 @@ def test_get_client_uses_auth_token_when_set(monkeypatch, tmp_path):
 
 def test_get_client_passes_base_url(monkeypatch, tmp_path):
     base = _fresh_base(monkeypatch, tmp_path, {
-        "ANTHROPIC_API_KEY": "k", "ANTHROPIC_BASE_URL": "https://gw.example"})
+        "ANTHROPIC_API_KEY": "k",
+        "ANTHROPIC_BASE_URL": "https://gw.example",
+        "MILA_LLM_PROVIDER": "anthropic",
+    })
     cap = _capture_client(monkeypatch, base)
     base.get_client()
     assert cap.get("base_url") == "https://gw.example"
