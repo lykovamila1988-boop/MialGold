@@ -18,6 +18,8 @@ import pytest
 _ALL_KEYS = (
     "ANTHROPIC_API_KEY", "ANTHROPIC_KEY",
     "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
+    "GEMINI_KEY", "GOOGLE_API_KEY",
+    "MILA_LLM_PROVIDER", "MILA_GEMINI_MODEL", "MILA_ANTHROPIC_AGENTS",
     "TELEGRAM_BOT_TOKEN", "TELEGRAM_API",
     "GUMROAD_ACCESS_TOKEN", "GUMROAD_TOKEN",
     "IG_ACCESS_TOKEN", "INSTAGRAM_ACCESS_TOKEN",
@@ -58,6 +60,29 @@ def test_canonical_takes_precedence(monkeypatch, tmp_path):
         "ANTHROPIC_KEY": "legacy",
     })
     assert base.ANTHROPIC_KEY == "canonical"
+
+
+def test_gemini_key_alias_resolves(monkeypatch, tmp_path):
+    base = _fresh_base(monkeypatch, tmp_path, {"GOOGLE_API_KEY": "google-key"})
+    assert base.GEMINI_KEY == "google-key"
+    assert base._CONFIG["GEMINI_KEY"] == "google-key"
+
+
+def test_provider_defaults_to_gemini_when_key_present(monkeypatch, tmp_path):
+    base = _fresh_base(monkeypatch, tmp_path, {"GEMINI_KEY": "gemini-key"})
+    assert base.LLM_PROVIDER == "gemini"
+    assert base.provider_for_agent("marina") == "gemini"
+    assert base.get_client() is None
+
+
+def test_anthropic_agent_override_when_configured(monkeypatch, tmp_path):
+    base = _fresh_base(monkeypatch, tmp_path, {
+        "GEMINI_KEY": "gemini-key",
+        "ANTHROPIC_API_KEY": "anthropic-key",
+        "MILA_ANTHROPIC_AGENTS": "manager",
+    })
+    assert base.provider_for_agent("manager") == "anthropic"
+    assert base.provider_for_agent("marina") == "gemini"
 
 
 def _capture_client(monkeypatch, base):

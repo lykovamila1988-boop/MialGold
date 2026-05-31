@@ -72,7 +72,7 @@ def _office_responder(mod, key):
     # compose_system подмешивает улучшения Стаса (prompt_overrides/<key>.md) к SYSTEM.
     def respond(msg, history):
         return base.run_agent(_client, base.compose_system(key, mod.SYSTEM),
-                              mod.TOOLS, mod.handle, msg, history)
+                              mod.TOOLS, mod.handle, msg, history, agent_key=key)
     return respond
 
 
@@ -80,7 +80,7 @@ def _marina_responder():
     # Марина со своим run_tool, но через общий runner — чтобы тоже получать улучшения.
     def respond(msg, history):
         return base.run_agent(_client, base.compose_system("marina", marina.SYSTEM_PROMPT),
-                              marina.TOOLS, marina.run_tool, msg, history)
+                              marina.TOOLS, marina.run_tool, msg, history, agent_key="marina")
     return respond
 
 
@@ -347,6 +347,11 @@ def _integration_status():
                    "mode": "auth_token (Bearer)" if base.ANTHROPIC_AUTH_TOKEN else "api_key (x-api-key)",
                    "oauth": False,
                    "note": "У Messages API нет публичного OAuth — авторизация по ключу."},
+        "gemini": {"configured": bool(base.GEMINI_KEY),
+                   "model": base.GEMINI_MODEL,
+                   "provider": base.LLM_PROVIDER,
+                   "heavy_lifting": base.LLM_PROVIDER in ("gemini", "google"),
+                   "anthropic_agents": sorted(base.ANTHROPIC_AGENT_KEYS)},
         "instagram": {"configured": bool(base.INSTAGRAM_TOKEN), "flow": base.IG_FLOW,
                       "node": base.IG_NODE or "", "oauth": bool(cid),
                       "redirect_uri": IG_REDIRECT_URI},
@@ -687,6 +692,11 @@ async function load(){
   // Claude
   el.innerHTML += '<div class="card"><h3>Claude (Anthropic)'+badge(s.claude.configured)+'</h3>'
     + '<p class="meta">Режим: <code>'+s.claude.mode+'</code><br>'+s.claude.note+'</p></div>';
+  // Gemini
+  el.innerHTML += '<div class="card"><h3>Gemini'+badge(s.gemini.configured)+'</h3>'
+    + '<p class="meta">Provider: <code>'+s.gemini.provider+'</code> / model: <code>'+s.gemini.model+'</code><br>'
+    + 'Heavy work: <code>'+(s.gemini.heavy_lifting?'Gemini':'Claude')+'</code> / Claude agents: <code>'
+    + (s.gemini.anthropic_agents||[]).join(', ')+'</code></p></div>';
   // Instagram + OAuth
   const ig = s.instagram;
   let igc = '<div class="card"><h3>Instagram'+badge(ig.configured)+'</h3>'

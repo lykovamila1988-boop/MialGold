@@ -339,7 +339,7 @@ def run_tool(name: str, inputs: dict) -> str:
 def run_agent(user_message: str, history: list):
     """Делегирует в общий base.run_agent — единый tool-use цикл для всех агентов
     (модель/лимит токенов берутся из base, печать tool-вызовов — тоже там)."""
-    return base.run_agent(client, SYSTEM_PROMPT, TOOLS, run_tool, user_message, history)
+    return base.run_agent(client, SYSTEM_PROMPT, TOOLS, run_tool, user_message, history, agent_key="marina")
 
 # ─── CLI INTERFACE ───────────────────────────────────────
 

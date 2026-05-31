@@ -38,6 +38,7 @@ if tools_env.exists():
 # TELEGRAM_API, шаблоны — ANTHROPIC_API_KEY / TELEGRAM_BOT_TOKEN). Принимаем оба, чтобы
 # существующий .env работал без правок. Канонические имена — первые в каждой цепочке.
 ANTHROPIC_KEY   = os.getenv("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_KEY")
+GEMINI_KEY      = os.getenv("GEMINI_KEY") or os.getenv("GOOGLE_API_KEY")
 TELEGRAM_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_API")
 GUMROAD_TOKEN   = os.getenv("GUMROAD_ACCESS_TOKEN") or os.getenv("GUMROAD_TOKEN")
 
@@ -49,8 +50,15 @@ ANTHROPIC_BASE_URL   = os.getenv("ANTHROPIC_BASE_URL")  # напр. URL gateway/
 
 # Модель Claude — настраивается через MILA_MODEL. Дефолт сохраняет прежнее
 # поведение; бамп до Opus 4.8 = поменять переменную окружения, без правок кода.
-MODEL      = os.getenv("MILA_MODEL", "claude-opus-4-6")
-MAX_TOKENS = int(os.getenv("MILA_MAX_TOKENS", "2048"))
+MODEL         = os.getenv("MILA_MODEL", "claude-opus-4-6")
+GEMINI_MODEL  = os.getenv("MILA_GEMINI_MODEL", "gemini-2.5-flash")
+MAX_TOKENS    = int(os.getenv("MILA_MAX_TOKENS", "2048"))
+LLM_PROVIDER  = (os.getenv("MILA_LLM_PROVIDER") or ("gemini" if GEMINI_KEY else "anthropic")).lower()
+ANTHROPIC_AGENT_KEYS = {
+    k.strip().lower()
+    for k in os.getenv("MILA_ANTHROPIC_AGENTS", "manager,producer").split(",")
+    if k.strip()
+}
 
 # Instagram: сначала рабочие IG_* (Instagram Login flow), потом старые INSTAGRAM_*.
 INSTAGRAM_TOKEN = os.getenv("IG_ACCESS_TOKEN") or os.getenv("INSTAGRAM_ACCESS_TOKEN")
@@ -89,6 +97,8 @@ def get_client():
     kwargs = {}
     if ANTHROPIC_BASE_URL:
         kwargs["base_url"] = ANTHROPIC_BASE_URL
+    if LLM_PROVIDER in ("gemini", "google") and not ANTHROPIC_AUTH_TOKEN and not ANTHROPIC_KEY:
+        return None
     if ANTHROPIC_AUTH_TOKEN:
         return anthropic.Anthropic(auth_token=ANTHROPIC_AUTH_TOKEN, **kwargs)
     require_config("ANTHROPIC_API_KEY")
@@ -98,6 +108,7 @@ def get_client():
 # Канонические имена → их значения (после разбора .env с учётом legacy-алиасов).
 _CONFIG = {
     "ANTHROPIC_API_KEY":    ANTHROPIC_KEY,
+    "GEMINI_KEY":           GEMINI_KEY,
     "TELEGRAM_BOT_TOKEN":   TELEGRAM_TOKEN,
     "GUMROAD_ACCESS_TOKEN": GUMROAD_TOKEN,
     "IG_ACCESS_TOKEN":      INSTAGRAM_TOKEN,
@@ -285,9 +296,116 @@ def compose_system(key: str, system: str) -> str:
     return system
 
 # ─── AGENT RUNNER ────────────────────────────────────────
-def run_agent(client, system: str, tools: list, tool_handler, user_message: str, history: list):
-    history.append({"role": "user", "content": user_message})
-    messages = history.copy()
+def _anthropic_configured() -> bool:
+    return bool(ANTHROPIC_AUTH_TOKEN or ANTHROPIC_KEY)
+
+
+def provider_for_agent(agent_key: str | None = None) -> str:
+    key = (agent_key or "").lower()
+    provider = (LLM_PROVIDER or "auto").lower()
+    if provider in ("anthropic", "claude"):
+        return "anthropic"
+    if provider in ("gemini", "google"):
+        if key in ANTHROPIC_AGENT_KEYS and _anthropic_configured():
+            return "anthropic"
+        return "gemini"
+    if key in ANTHROPIC_AGENT_KEYS and _anthropic_configured():
+        return "anthropic"
+    if GEMINI_KEY:
+        return "gemini"
+    return "anthropic"
+
+
+def _strip_gemini_schema(value):
+    if isinstance(value, dict):
+        return {
+            k: _strip_gemini_schema(v)
+            for k, v in value.items()
+            if k not in {"default", "$schema"}
+        }
+    if isinstance(value, list):
+        return [_strip_gemini_schema(v) for v in value]
+    return value
+
+
+def _gemini_tools(tools: list) -> list:
+    declarations = []
+    for tool in tools or []:
+        declarations.append({
+            "name": tool["name"],
+            "description": tool.get("description", ""),
+            "parameters": _strip_gemini_schema(
+                tool.get("input_schema") or {"type": "object", "properties": {}}
+            ),
+        })
+    return [{"function_declarations": declarations}] if declarations else []
+
+
+def _gemini_contents(messages: list) -> list:
+    contents = []
+    for msg in messages:
+        role = "model" if msg.get("role") == "assistant" else "user"
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            contents.append({"role": role, "parts": [{"text": content}]})
+    return contents
+
+
+def _gemini_generate(contents: list, system: str, tools: list) -> dict:
+    require_config("GEMINI_KEY")
+    payload = {
+        "system_instruction": {"parts": [{"text": system}]},
+        "contents": contents,
+        "generationConfig": {"maxOutputTokens": MAX_TOKENS},
+    }
+    converted_tools = _gemini_tools(tools)
+    if converted_tools:
+        payload["tools"] = converted_tools
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+    resp = requests.post(url, params={"key": GEMINI_KEY}, json=payload, timeout=90)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _run_gemini_agent(system: str, tools: list, tool_handler, messages: list, history: list):
+    contents = _gemini_contents(messages)
+    while True:
+        data = _gemini_generate(contents, system, tools)
+        parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+        texts = [p["text"] for p in parts if p.get("text")]
+        calls = [p["functionCall"] for p in parts if p.get("functionCall")]
+
+        if not calls:
+            reply = "\n".join(texts)
+            history.append({"role": "assistant", "content": reply})
+            return reply, history
+
+        if texts:
+            console.print(f"[dim italic]{''.join(texts)}[/dim italic]")
+
+        model_parts = []
+        response_parts = []
+        for call in calls:
+            name = call.get("name", "")
+            args = call.get("args") or {}
+            if not isinstance(args, dict):
+                args = {}
+            console.print(f"  [dim]tool {name}({list(args.keys())})[/dim]")
+            result = tool_handler(name, args)
+            model_parts.append({"functionCall": {"name": name, "args": args}})
+            response_parts.append({
+                "functionResponse": {
+                    "name": name,
+                    "response": {"result": "" if result is None else str(result)},
+                }
+            })
+        contents.append({"role": "model", "parts": model_parts})
+        contents.append({"role": "user", "parts": response_parts})
+
+
+def _run_anthropic_agent(client, system: str, tools: list, tool_handler, messages: list, history: list):
+    if client is None:
+        client = get_client()
 
     while True:
         resp = client.messages.create(
@@ -310,10 +428,24 @@ def run_agent(client, system: str, tools: list, tool_handler, user_message: str,
         messages.append({"role": "assistant", "content": resp.content})
         results = []
         for c in calls:
-            console.print(f"  [dim]🔧 {c.name}({list(c.input.keys())})[/dim]")
+            console.print(f"  [dim]tool {c.name}({list(c.input.keys())})[/dim]")
             result = tool_handler(c.name, c.input)
             results.append({"type": "tool_result", "tool_use_id": c.id, "content": result})
         messages.append({"role": "user", "content": results})
+
+
+def run_agent(client, system: str, tools: list, tool_handler, user_message: str, history: list,
+              agent_key: str | None = None):
+    history.append({"role": "user", "content": user_message})
+    messages = history.copy()
+    provider = provider_for_agent(agent_key)
+    if provider == "anthropic" and not _anthropic_configured() and GEMINI_KEY:
+        provider = "gemini"
+    if provider == "gemini" and not GEMINI_KEY and _anthropic_configured():
+        provider = "anthropic"
+    if provider == "gemini":
+        return _run_gemini_agent(system, tools, tool_handler, messages, history)
+    return _run_anthropic_agent(client, system, tools, tool_handler, messages, history)
 
 def chat_loop(name: str, emoji: str, color: str, system: str, tools: list, tool_handler, quick_cmds: dict):
     client = get_client()
