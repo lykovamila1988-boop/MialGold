@@ -82,14 +82,23 @@ _CFG = {"token": "t", "version": "v21.0", "base": "https://graph.example"}
 
 
 def test_graph_get_ok(monkeypatch):
+    monkeypatch.setattr(c, "check_rate_limit", lambda cfg, cost=1: {"ok": True})
     monkeypatch.setattr(c._session, "get",
                         lambda url, params=None, timeout=None: FakeResp({"data": [1, 2]}))
     assert c.graph_get(_CFG, "path")["data"] == [1, 2]
 
 
 def test_graph_get_error_payload_raises(monkeypatch):
+    monkeypatch.setattr(c, "check_rate_limit", lambda cfg, cost=1: {"ok": True})
     monkeypatch.setattr(c._session, "get",
                         lambda url, params=None, timeout=None: FakeResp({"error": {"message": "no"}}, status=400))
+    with pytest.raises(c.GraphError):
+        c.graph_get(_CFG, "path")
+
+
+def test_graph_get_rate_limit_raises(monkeypatch):
+    monkeypatch.setattr(c, "check_rate_limit",
+                        lambda cfg, cost=1: (_ for _ in ()).throw(c.GraphError("Rate limit instagram_api")))
     with pytest.raises(c.GraphError):
         c.graph_get(_CFG, "path")
 

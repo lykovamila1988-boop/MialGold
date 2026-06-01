@@ -330,11 +330,33 @@ _AGENT_FILES = {
     "marina": "agent.py", "victoria": "victoria.py", "alina": "alina.py",
     "dima": "dima.py", "tyoma": "tyoma.py", "olya": "olya.py",
     "vasya": "vasya.py", "lera": "lera.py", "producer": "producer.py",
+    "rita": "rita.py",
 }  # себя (manager) Стас не правит автоматически
 _OFFICE_DIR = MILA_FOLDER / "mila-office"
 _BACKUP_DIR = MILA_FOLDER / "backups" / "agents"
+# Версионирование overrides: снимок файла prompt_overrides/<agent>.md ПЕРЕД каждым
+# изменением → откат на N шагов (#8). Снимки тут, по агенту, с меткой времени.
+_OVERRIDE_HISTORY = MILA_FOLDER / "MILA-BUSINESS" / "05-analytics" / "prompt_overrides" / ".history"
 IMPROVEMENT_LOG = MILA_FOLDER / "MILA-BUSINESS" / "05-analytics" / "improvement_log.md"
 _SYSTEM_RE = re.compile(r"SYSTEM(?:_PROMPT)?\s*=\s*(\"\"\"|''')(.*?)\1", re.S)
+
+
+def _snapshot_overrides(agent, ts):
+    """Сохраняет текущее состояние prompt_overrides/<agent>.md (или пустого) в
+    .history/<agent>/<ts>.md — чтобы можно было откатиться на N шагов назад."""
+    ofile = PROMPT_OVERRIDES_DIR / f"{agent}.md"
+    snap_dir = _OVERRIDE_HISTORY / agent
+    snap_dir.mkdir(parents=True, exist_ok=True)
+    content = ofile.read_text(encoding="utf-8") if ofile.exists() else ""
+    (snap_dir / f"{ts}.md").write_text(content, encoding="utf-8")
+
+
+def _override_snapshots(agent):
+    """Список снимков агента, новейшие — в конце (по имени = времени)."""
+    snap_dir = _OVERRIDE_HISTORY / agent
+    if not snap_dir.exists():
+        return []
+    return sorted(snap_dir.glob("*.md"))
 
 
 def _log_improvement(line):
@@ -360,9 +382,37 @@ def read_agent_prompt(agent):
     }, ensure_ascii=False, indent=2)
 
 
-def improve_agent(agent, addition, rationale="", data=""):
-    """Применяет улучшение промпта агента: бэкап исходника → дозапись в overrides → лог.
-    Требует обоснование (rationale) и данные (data) — иначе отказ."""
+# Максимум активных выводов в overrides одного агента. Старше — вытесняются
+# (полная история остаётся в improvement_log.md). Защита от распухания промпта.
+_MAX_ACTIVE_OVERRIDES = 7
+# Секция override: "## <topic> — <ts>" … до следующей "## " или конца файла.
+_OVERRIDE_SECTION_RE = re.compile(
+    r"^##\s+(?P<topic>.+?)\s+—\s+(?P<ts>[\d_\-:]+)\s*$(?P<body>.*?)(?=^##\s|\Z)",
+    re.MULTILINE | re.DOTALL,
+)
+
+
+def _parse_overrides(text):
+    """Разбирает overrides-файл на список секций [{topic, ts, raw}]. Текст до
+    первой '## ' (преамбула) сохраняется отдельно."""
+    sections, preamble_end = [], None
+    for m in _OVERRIDE_SECTION_RE.finditer(text):
+        if preamble_end is None:
+            preamble_end = m.start()
+        sections.append({"topic": m.group("topic").strip(),
+                         "ts": m.group("ts").strip(),
+                         "raw": m.group(0).rstrip()})
+    preamble = text[:preamble_end] if preamble_end is not None else (text if not sections else "")
+    return preamble.rstrip(), sections
+
+
+def improve_agent(agent, addition, rationale="", data="", topic=""):
+    """Применяет улучшение промпта агента через overrides со СТРАТЕГИЕЙ ВЫТЕСНЕНИЯ:
+    вывод по той же теме (topic) заменяет старый, активных ≤ _MAX_ACTIVE_OVERRIDES;
+    вытесненное уходит в improvement_log.md. Требует rationale + data.
+
+    topic — короткий тег темы (напр. «хуки», «тема-отношения»). Если пуст — берём
+    из первых слов addition, чтобы повторные выводы по одной теме не накапливались."""
     agent = (agent or "").strip().lower()
     if agent not in _AGENT_FILES:
         return f"Неизвестный агент: {agent}. Доступны: {', '.join(_AGENT_FILES)}"
@@ -371,38 +421,100 @@ def improve_agent(agent, addition, rationale="", data=""):
     if not (rationale or "").strip() or not (data or "").strip():
         return ("⛔ Правило безопасности: не меняю агента без обоснования и данных. "
                 "Передай rationale (почему) и data (на каких цифрах/наблюдениях основано).")
-    # 1) бэкап исходника
+    topic = (topic or " ".join(addition.strip().split()[:4])).strip().lower()
     ts = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+
+    # 1) бэкап исходника агента (как было)
     src = _OFFICE_DIR / _AGENT_FILES[agent]
     _BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     if src.exists():
         (_BACKUP_DIR / f"{_AGENT_FILES[agent]}.{ts}.bak").write_text(
             src.read_text(encoding="utf-8"), encoding="utf-8")
-    # 2) дозапись улучшения в overrides (код агента не трогаем)
+
+    # 2) читаем текущие overrides, парсим на секции
     PROMPT_OVERRIDES_DIR.mkdir(parents=True, exist_ok=True)
     ofile = PROMPT_OVERRIDES_DIR / f"{agent}.md"
-    with open(ofile, "a", encoding="utf-8") as f:
-        f.write(f"\n## {ts}\n{addition.strip()}\n"
-                f"_Основание: {rationale.strip()} · Данные: {data.strip()}_\n")
-    # 3) лог
-    _log_improvement(f"IMPROVE {agent}: {addition.strip()[:90]} | почему: "
-                     f"{rationale.strip()[:80]} | данные: {data.strip()[:80]}")
-    return (f"✓ Улучшение применено к «{agent}» (через overrides; исходник в backups/agents/ {ts}).\n"
-            f"Применяется со следующего сообщения агента. Откат: revert_agent('{agent}').")
+    text = ofile.read_text(encoding="utf-8") if ofile.exists() else ""
+    # снимок ДО изменения — для отката на N шагов (revert_agent steps=N)
+    _snapshot_overrides(agent, ts)
+    preamble, sections = _parse_overrides(text)
+
+    # 3) вытеснение: убрать прежнюю секцию с тем же topic
+    evicted = [s for s in sections if s["topic"] == topic]
+    sections = [s for s in sections if s["topic"] != topic]
+    for s in evicted:
+        _log_improvement(f"EVICT {agent}/{topic}: вытеснен прежний вывод ({s['ts']})")
+
+    # 4) новая секция
+    new_section = (f"## {topic} — {ts}\n{addition.strip()}\n"
+                   f"_Основание: {rationale.strip()} · Данные: {data.strip()}_")
+    sections.append({"topic": topic, "ts": ts, "raw": new_section})
+
+    # 5) кап по количеству: старейшие сверх лимита вытесняем в лог
+    if len(sections) > _MAX_ACTIVE_OVERRIDES:
+        sections.sort(key=lambda s: s["ts"])  # старые первыми
+        overflow = sections[:len(sections) - _MAX_ACTIVE_OVERRIDES]
+        sections = sections[len(overflow):]
+        for s in overflow:
+            _log_improvement(f"EVICT {agent}/{s['topic']}: вытеснен по лимиту ({s['ts']})")
+
+    # 6) пересобрать файл (преамбула + активные секции, новейшие снизу)
+    sections.sort(key=lambda s: s["ts"])
+    head = (preamble + "\n\n") if preamble.strip() else ""
+    ofile.write_text(head + "\n\n".join(s["raw"] for s in sections) + "\n", encoding="utf-8")
+
+    _log_improvement(f"IMPROVE {agent}/{topic}: {addition.strip()[:80]} | почему: "
+                     f"{rationale.strip()[:60]} | данные: {data.strip()[:60]}")
+    return (f"✓ Улучшение «{agent}» по теме «{topic}» применено (вытеснение по теме; "
+            f"активных выводов: {len(sections)}/{_MAX_ACTIVE_OVERRIDES}; исходник в backups/agents/ {ts}).\n"
+            f"Применяется со следующего сообщения. Откат: revert_agent('{agent}').")
 
 
-def revert_agent(agent):
-    """Убирает все улучшения (overrides) агента — откат к исходному промпту."""
+def revert_agent(agent, steps=0):
+    """Откат улучшений агента.
+
+    steps=0 (по умолчанию) — убрать ВСЕ улучшения (вернуть исходный промпт).
+    steps=N>0 — откатить на N изменений назад: восстановить override-файл из
+    снимка, сделанного перед N-м с конца улучшением. Так, если Стас сделал
+    5 плохих апдейтов подряд, revert_agent(agent, steps=3) вернёт состояние
+    до последних трёх."""
     agent = (agent or "").strip().lower()
+    if agent not in _AGENT_FILES:
+        return f"Неизвестный агент: {agent}. Доступны: {', '.join(_AGENT_FILES)}"
     ofile = PROMPT_OVERRIDES_DIR / f"{agent}.md"
-    if not ofile.exists():
-        return f"У «{agent}» нет активных улучшений."
     ts = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-    (PROMPT_OVERRIDES_DIR / f"{agent}.md.{ts}.removed").write_text(
-        ofile.read_text(encoding="utf-8"), encoding="utf-8")
-    ofile.unlink()
-    _log_improvement(f"REVERT {agent}: улучшения убраны (копия сохранена)")
-    return f"✓ Откат «{agent}»: улучшения убраны (копия сохранена). Действует со следующего сообщения."
+    try:
+        steps = int(steps)
+    except (ValueError, TypeError):
+        steps = 0
+
+    if steps <= 0:
+        # полный откат — снести overrides
+        if not ofile.exists():
+            return f"У «{agent}» нет активных улучшений."
+        _snapshot_overrides(agent, ts)  # снимок текущего перед сносом (можно вернуть)
+        (PROMPT_OVERRIDES_DIR / f"{agent}.md.{ts}.removed").write_text(
+            ofile.read_text(encoding="utf-8"), encoding="utf-8")
+        ofile.unlink()
+        _log_improvement(f"REVERT {agent}: все улучшения убраны (копия сохранена)")
+        return f"✓ Откат «{agent}»: все улучшения убраны. Действует со следующего сообщения."
+
+    # откат на N шагов: каждый improve делал снимок ДО себя, поэтому снимок с
+    # индексом -steps = состояние до последних N улучшений.
+    snaps = _override_snapshots(agent)
+    if len(snaps) < steps:
+        return (f"У «{agent}» только {len(snaps)} снимков — нельзя откатить на {steps}. "
+                f"Доступно шагов: {len(snaps)} (или revert_agent('{agent}') — полный откат).")
+    target = snaps[-steps]
+    _snapshot_overrides(agent, ts)  # снимок текущего (чтобы откат тоже был обратим)
+    restored = target.read_text(encoding="utf-8")
+    if restored.strip():
+        ofile.write_text(restored, encoding="utf-8")
+    elif ofile.exists():
+        ofile.unlink()  # снимок был пустой → состояние «без улучшений»
+    _log_improvement(f"REVERT {agent}: откат на {steps} шаг(ов) к снимку {target.stem}")
+    return (f"✓ Откат «{agent}» на {steps} шаг(ов): восстановлено состояние "
+            f"{target.stem}. Действует со следующего сообщения.")
 
 
 def log_experiment(hypothesis, variable="", metric=""):
@@ -429,7 +541,7 @@ def improvement_history(limit=30):
     return "\n".join(tail) or "История пуста."
 
 
-_DB_TABLES = ("products", "purchases", "consultations", "telegram_leads",
+_DB_TABLES = ("products", "digital_products", "purchases", "consultations", "telegram_leads",
               "kpi_snapshots", "content", "ig_posts", "users")
 
 
@@ -491,19 +603,26 @@ TOOLS = core_tools("Прочитать лог/отчёт/файл рабочей
          "priority": {"type": "string", "enum": ["P1", "P2", "P3"], "default": "P2"}},
          "required": ["title"]}},
     {"name": "read_agent_prompt",
-     "description": "Прочитать текущий SYSTEM-промпт агента + активные улучшения. agent: marina/victoria/alina/dima/tyoma/olya/vasya/lera/producer.",
+     "description": "Прочитать текущий SYSTEM-промпт агента + активные улучшения. agent: marina/victoria/alina/dima/tyoma/olya/vasya/lera/producer/rita.",
      "input_schema": {"type": "object", "properties": {"agent": {"type": "string"}}, "required": ["agent"]}},
     {"name": "improve_agent",
-     "description": "Применить улучшение промпта агента (через overrides; бэкап + лог автоматом). ТРЕБУЕТ rationale и data — иначе откажет. Вступает в силу после перезапуска.",
+     "description": "Применить улучшение промпта агента (через overrides; бэкап + лог автоматом). "
+                    "ТРЕБУЕТ rationale и data. Вывод по той же теме (topic) ВЫТЕСНЯЕТ старый — "
+                    "промпт не распухает. Применяется со следующего сообщения агента.",
      "input_schema": {"type": "object", "properties": {
          "agent": {"type": "string"},
          "addition": {"type": "string", "description": "Что дописать в промпт агента"},
          "rationale": {"type": "string", "description": "Почему — гипотеза/логика"},
-         "data": {"type": "string", "description": "На каких цифрах/наблюдениях основано"}},
+         "data": {"type": "string", "description": "На каких цифрах/наблюдениях основано"},
+         "topic": {"type": "string", "description": "Короткий тег темы (напр. «хуки», «тема-отношения»). Новый вывод по той же теме заменит старый."}},
          "required": ["agent", "addition", "rationale", "data"]}},
     {"name": "revert_agent",
-     "description": "Откат: убрать все улучшения (overrides) агента, вернуть исходный промпт.",
-     "input_schema": {"type": "object", "properties": {"agent": {"type": "string"}}, "required": ["agent"]}},
+     "description": "Откат улучшений агента. steps=0 — убрать ВСЕ (исходный промпт); steps=N — "
+                    "откатить на N изменений назад (если сделано N плохих апдейтов подряд).",
+     "input_schema": {"type": "object", "properties": {
+         "agent": {"type": "string"},
+         "steps": {"type": "integer", "default": 0, "description": "0 = полный откат; N = на N шагов назад"}},
+         "required": ["agent"]}},
     {"name": "log_experiment",
      "description": "Залогировать один A/B-эксперимент недели (одна переменная).",
      "input_schema": {"type": "object", "properties": {
@@ -544,9 +663,10 @@ def handle(name, inp):
         return read_agent_prompt(inp.get("agent", ""))
     if name == "improve_agent":
         return improve_agent(inp.get("agent", ""), inp.get("addition", ""),
-                             inp.get("rationale", ""), inp.get("data", ""))
+                             inp.get("rationale", ""), inp.get("data", ""),
+                             inp.get("topic", ""))
     if name == "revert_agent":
-        return revert_agent(inp.get("agent", ""))
+        return revert_agent(inp.get("agent", ""), inp.get("steps", 0))
     if name == "log_experiment":
         return log_experiment(inp.get("hypothesis", ""), inp.get("variable", ""), inp.get("metric", ""))
     if name == "improvement_history":

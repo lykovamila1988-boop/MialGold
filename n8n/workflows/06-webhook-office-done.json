@@ -1,0 +1,42 @@
+{
+  "name": "MILA — Webhook office-done",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "office-done",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "f1b2c3d4-0006-4000-8000-000000000001",
+      "name": "Webhook office-done",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "mila-office-done"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:5051/v1/notify",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body || $json) }}",
+        "options": {"timeout": 60000}
+      },
+      "id": "f1b2c3d4-0006-4000-8000-000000000002",
+      "name": "Telegram notify",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [480, 300]
+    }
+  ],
+  "connections": {
+    "Webhook office-done": {
+      "main": [[{"node": "Telegram notify", "type": "main", "index": 0}]]
+    }
+  },
+  "active": false,
+  "settings": {"executionOrder": "v1"},
+  "meta": {"templateCredsSetupCompleted": true}
+}

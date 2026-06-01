@@ -1,0 +1,41 @@
+{
+  "name": "MILA — Monday brief",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{"field": "cronExpression", "expression": "0 7 * * 1"}]
+        }
+      },
+      "id": "c1b2c3d4-0003-4000-8000-000000000001",
+      "name": "Monday 07:00 UTC",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:5051/v1/pipeline/monday_brief",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [{"name": "notify", "value": "1"}]
+        },
+        "options": {"timeout": 3600000}
+      },
+      "id": "c1b2c3d4-0003-4000-8000-000000000002",
+      "name": "Pipeline monday_brief",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [480, 300]
+    }
+  ],
+  "connections": {
+    "Monday 07:00 UTC": {
+      "main": [[{"node": "Pipeline monday_brief", "type": "main", "index": 0}]]
+    }
+  },
+  "active": false,
+  "settings": {"executionOrder": "v1"},
+  "meta": {"templateCredsSetupCompleted": true}
+}

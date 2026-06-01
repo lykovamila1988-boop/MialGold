@@ -33,6 +33,8 @@ def get_posts(cfg, limit):
             "id": m.get("id"),
             "type": m.get("media_product_type") or m.get("media_type"),
             "date": m.get("timestamp", "")[:10],
+            "timestamp": m.get("timestamp"),
+            "published_time": (m.get("timestamp", "")[11:16] if m.get("timestamp") else ""),
             "likes": m.get("like_count", 0),
             "comments": m.get("comments_count", 0),
             "caption": (m.get("caption") or "")[:200],

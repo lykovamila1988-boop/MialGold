@@ -3,8 +3,10 @@ import sys
 
 
 class FakeResponse:
-    def __init__(self, data):
+    def __init__(self, data, status_code=200):
         self._data = data
+        # base._run_gemini_agent проверяет resp.status_code для retry на 429/5xx.
+        self.status_code = status_code
 
     def raise_for_status(self):
         return None

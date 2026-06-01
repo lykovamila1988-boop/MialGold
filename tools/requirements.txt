@@ -1,3 +1,7 @@
-requests>=2.31.0
-python-dotenv>=1.0.0
-python-docx>=1.1.0   # make_report.py — сборка .docx-отчёта по аналитике
+# MILA tools — зависимости (Instagram/Threads API, отчёты, Supabase, Telegram).
+# Диапазоны закреплены: нижняя граница = протестированная версия, верх = след. мажор,
+# чтобы обновление библиотеки не сломало скрипты незаметно.
+# Закреплено 2026-06-01 по фактически установленным версиям.
+requests>=2.32,<3.0        # tested 2.32.3
+python-dotenv>=1.2,<2.0    # tested 1.2.2
+python-docx>=1.2,<2.0      # tested 1.2.0 — make_report.py (.docx-отчёты)

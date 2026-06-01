@@ -1,0 +1,37 @@
+{
+  "name": "MILA — Webapp alerts",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{"field": "minutes", "minutesInterval": 15}]
+        }
+      },
+      "id": "h1b2c3d4-0008-4000-8000-000000000001",
+      "name": "Every 15 min",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:5051/v1/tools/alert_errors",
+        "options": {"timeout": 120000}
+      },
+      "id": "h1b2c3d4-0008-4000-8000-000000000002",
+      "name": "Check webapp.log",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [480, 300]
+    }
+  ],
+  "connections": {
+    "Every 15 min": {
+      "main": [[{"node": "Check webapp.log", "type": "main", "index": 0}]]
+    }
+  },
+  "active": false,
+  "settings": {"executionOrder": "v1"},
+  "meta": {"templateCredsSetupCompleted": true}
+}

@@ -1,0 +1,97 @@
+{
+  "name": "MILA — Sunday analytics",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{"field": "cronExpression", "expression": "0 16 * * 0"}]
+        }
+      },
+      "id": "d1b2c3d4-0004-4000-8000-000000000001",
+      "name": "Sunday 16:00 UTC",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:5051/v1/tools/get_analytics/account",
+        "options": {"timeout": 300000}
+      },
+      "id": "d1b2c3d4-0004-4000-8000-000000000002",
+      "name": "IG account stats",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [480, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:5051/v1/tools/get_analytics/posts",
+        "options": {"timeout": 300000}
+      },
+      "id": "d1b2c3d4-0004-4000-8000-000000000003",
+      "name": "IG posts export",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [720, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:5051/v1/tools/measure_due",
+        "options": {"timeout": 300000}
+      },
+      "id": "d1b2c3d4-0004-4000-8000-000000000006",
+      "name": "Measure 48h posts",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [840, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:5051/v1/tools/weekly_kpi",
+        "options": {"timeout": 120000}
+      },
+      "id": "d1b2c3d4-0004-4000-8000-000000000004",
+      "name": "Weekly KPI",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [960, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:5051/v1/tools/weekly_digest",
+        "options": {"timeout": 120000}
+      },
+      "id": "d1b2c3d4-0004-4000-8000-000000000005",
+      "name": "Weekly digest",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1200, 300]
+    }
+  ],
+  "connections": {
+    "Sunday 16:00 UTC": {
+      "main": [[{"node": "IG account stats", "type": "main", "index": 0}]]
+    },
+    "IG account stats": {
+      "main": [[{"node": "IG posts export", "type": "main", "index": 0}]]
+    },
+    "IG posts export": {
+      "main": [[{"node": "Measure 48h posts", "type": "main", "index": 0}]]
+    },
+    "Measure 48h posts": {
+      "main": [[{"node": "Weekly KPI", "type": "main", "index": 0}]]
+    },
+    "Weekly KPI": {
+      "main": [[{"node": "Weekly digest", "type": "main", "index": 0}]]
+    }
+  },
+  "active": false,
+  "settings": {"executionOrder": "v1"},
+  "meta": {"templateCredsSetupCompleted": true}
+}

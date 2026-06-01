@@ -1,0 +1,41 @@
+{
+  "name": "MILA — Sunday weekly report",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{"field": "cronExpression", "expression": "0 17 * * 0"}]
+        }
+      },
+      "id": "e1b2c3d4-0005-4000-8000-000000000001",
+      "name": "Sunday 17:00 UTC",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:5051/v1/pipeline/weekly_report",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [{"name": "notify", "value": "1"}]
+        },
+        "options": {"timeout": 3600000}
+      },
+      "id": "e1b2c3d4-0005-4000-8000-000000000002",
+      "name": "Pipeline weekly_report",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [480, 300]
+    }
+  ],
+  "connections": {
+    "Sunday 17:00 UTC": {
+      "main": [[{"node": "Pipeline weekly_report", "type": "main", "index": 0}]]
+    }
+  },
+  "active": false,
+  "settings": {"executionOrder": "v1"},
+  "meta": {"templateCredsSetupCompleted": true}
+}

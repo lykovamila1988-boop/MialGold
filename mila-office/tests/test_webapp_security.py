@@ -13,7 +13,7 @@ def _fresh_webapp(monkeypatch, tmp_path):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     for name in (
         "base", "agent", "victoria", "alina", "dima", "tyoma", "olya",
-        "vasya", "lera", "manager", "producer", "webapp",
+        "vasya", "lera", "manager", "producer", "memory", "policies", "webapp",
     ):
         sys.modules.pop(name, None)
     appmod = importlib.import_module("webapp")
@@ -68,3 +68,27 @@ def test_settings_token_save_requires_csrf(monkeypatch, tmp_path):
     response = client.post("/api/settings/instagram-token", json={"token": "fake"})
 
     assert response.status_code == 403
+
+
+def test_operator_page_and_actions(monkeypatch, tmp_path):
+    appmod = _fresh_webapp(monkeypatch, tmp_path)
+    task = appmod.memory.enqueue_task("content_week", priority=2, dedupe_key="cw:test")
+    appmod.memory.complete_task(task["id"], "failed", {"error": "boom"})
+    client, csrf = _client_with_csrf(appmod)
+
+    page = client.get("/operator")
+    assert page.status_code == 200
+    assert b"Queue Control" in page.data
+
+    data = client.get("/api/operator").get_json()
+    assert data["ok"] is True
+    assert data["tasks"][0]["dedupe_key"] == "cw:test"
+    assert "events" in data
+
+    response = client.post(
+        f"/api/operator/task/{task['id']}/retry",
+        json={"reset_attempts": True},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert response.status_code == 200
+    assert response.get_json()["task"]["status"] == "pending"

@@ -1,24 +1,69 @@
+# ── Secrets & credentials ─────────────────────────────────────
 .env
 .env.*
 !.env.example
 !env.template
 
+tools/.env
+tools/Passwords
+tools/*password*
+tools/manychat_webhook_backup.txt
+
+# ── Python ──────────────────────────────────────────────────────
 __pycache__/
+*.py[cod]
 .pytest_cache/
 .coverage
-*.pyc
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+venv/
+.venv/
 
+# ── Node (Supabase JS helpers at repo root) ─────────────────────
+node_modules/
+
+# ── n8n local runtime (cache, sqlite, credentials) ──────────────
+n8n-data/
+
+# ── Generated / runtime data ────────────────────────────────────
 logs/
 reports/
 backups/
+
+# Agent shared memory — recreated at runtime (defaults live in memory.py)
+mila-office/memory/
+
+# ── IDE & local tooling ─────────────────────────────────────────
 .qodo/
 .claude/
+.cursor/
+.vscode/
+.idea/
 
+# ── OS junk ─────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ── Deprecated duplicate tree (canonical: MILA-BUSINESS/) ───────
+MILA/
+
+# ── Client data (confidential — keep README placeholders only) ──
+MILA-BUSINESS/03-clients/session-notes/*
+!MILA-BUSINESS/03-clients/session-notes/README.txt
+MILA-BUSINESS/03-clients/intake-forms/*
+!MILA-BUSINESS/03-clients/intake-forms/README.txt
+MILA-BUSINESS/03-clients/profiles/
+
+# ── Large / export artifacts ────────────────────────────────────
 *.pdf
 *.docx
 *.doc
 
-tools/.env
 MILA-BUSINESS/05-analytics/*.html
 MILA-BUSINESS/05-analytics/*.doc
 MILA-BUSINESS/05-analytics/*.json
+
+# webapp Flask secret (CSRF/session) — не коммитить
+mila-office/.secret_key

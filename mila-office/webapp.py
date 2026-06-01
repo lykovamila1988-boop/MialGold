@@ -20,20 +20,24 @@ except Exception:
     pass
 
 import importlib
+import json
 import logging
 import os
+import re
 import secrets
 import threading
 import uuid
 import webbrowser
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from urllib.parse import urlencode
 
 import requests
 from flask import Flask, request, jsonify, redirect, session, Response, abort
 
 import base
+import memory  # общая память офиса (профиль/фаза/события) — для дашборда
 
 # ─── Логирование ─────────────────────────────────────────
 # Полный traceback пишем в файл, клиенту отдаём безопасное сообщение.
@@ -61,6 +65,7 @@ _mods = {
     "olya":     importlib.import_module("olya"),
     "vasya":    importlib.import_module("vasya"),
     "lera":     importlib.import_module("lera"),
+    "rita":     importlib.import_module("rita"),
     "manager":  importlib.import_module("manager"),
     "producer": importlib.import_module("producer"),
 }
@@ -92,7 +97,7 @@ def _chips(mod):
         if k in ("/помощь", "/выход"):
             continue
         out.append({"label": k.lstrip("/").capitalize(), "prompt": v})
-    return out[:6]
+    return out[:10]  # у Стаса 8 команд — лимит 6 их резал; держим запас
 
 
 AGENTS = {
@@ -161,6 +166,13 @@ AGENTS = {
                  "«как вырасти за квартал».\n\nНачни с быстрого действия — «Линейка» или «Запуск».",
         "responder": _office_responder(_mods["producer"], "producer"), "chips": _chips(_mods["producer"]),
     },
+    "rita": {
+        "name": "Рита", "role": "Продуктовый архитектор", "emoji": "📚", "color": "#9C5BA8",
+        "intro": "Я Рита, архитектор цифровых продуктов. Превращаю идею в ясную структуру "
+                 "(главы, упражнения, поток) — основу для PDF-воркбука, который напишет Марина "
+                 "и отредактирует Виктория.\n\nНачни с «Воркбук» или опиши идею продукта.",
+        "responder": _office_responder(_mods["rita"], "rita"), "chips": _chips(_mods["rita"]),
+    },
 }
 
 # Состояние чата хранится по браузерной сессии, чтобы вкладки/пользователи
@@ -177,9 +189,25 @@ MAX_JOBS = 200           # бэкстоп против утечки незабр
 MAX_HISTORY_MSGS = 40    # ~20 последних реплик user/assistant на агента (защита памяти/токенов)
 
 app = Flask(__name__)
-# Нужен для session (CSRF-state в OAuth). Локальное single-user приложение —
-# эфемерного ключа на процесс достаточно; можно зафиксировать через FLASK_SECRET_KEY.
-app.secret_key = os.getenv("FLASK_SECRET_KEY") or secrets.token_hex(16)
+# Нужен для session (CSRF + OAuth-state). Ключ ДОЛЖЕН переживать перезапуск, иначе
+# каждый рестарт инвалидирует session-cookie открытой вкладки → старый CSRF-токен не
+# сходится с новым → POST /api/chat падает 403 (фронт ловит как «Сеть недоступна»).
+# Берём из .env, иначе генерим один раз и кладём в .secret_key рядом с webapp.
+def _persistent_secret():
+    env = os.getenv("FLASK_SECRET_KEY")
+    if env:
+        return env
+    f = Path(__file__).resolve().parent / ".secret_key"
+    try:
+        if f.exists():
+            return f.read_text(encoding="utf-8").strip()
+        key = secrets.token_hex(32)
+        f.write_text(key, encoding="utf-8")
+        return key
+    except OSError:
+        return secrets.token_hex(32)  # фолбэк: хотя бы не падаем
+
+app.secret_key = _persistent_secret()
 app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
@@ -256,6 +284,22 @@ def _run_job(job_id, sid, key, msg):
         _set_job(job_id, {"status": "done", "sid": sid, "error": "Внутренняя ошибка — см. логи (logs/webapp.log)"})
 
 
+# Короткое описание агента для тултипа (1-2 строки). Имена/роли — как в AGENTS.
+_TAGLINES = {
+    "marina":   "Контент, стратегия роста, аналитика Instagram.",
+    "victoria": "Проверяет тексты перед публикацией: голос, хук, CTA.",
+    "alina":    "Анкеты, подготовка к сессиям, CRM клиенток.",
+    "dima":     "Доход, Gumroad, прогнозы и цели.",
+    "tyoma":    "Telegram-канал, бот, welcome-цепочка.",
+    "olya":     "Вирусные темы, тренды, конкуренты.",
+    "vasya":    "Расписание публикаций и что нужно снять.",
+    "lera":     "Воронка, офферы, конверсия в продажи.",
+    "manager":  "Система, метрики офиса, самообучение.",
+    "producer": "Продуктовая линейка, запуски, масштаб дохода.",
+    "rita":     "Структура цифровых продуктов: воркбуки, гайды.",
+}
+
+
 @app.get("/api/meta")
 def meta():
     _session_id()
@@ -263,7 +307,8 @@ def meta():
         "csrf": _csrf_token(),
         "agents": [
             {"key": k, "name": a["name"], "role": a["role"], "emoji": a["emoji"],
-             "color": a["color"], "intro": a["intro"], "chips": a["chips"]}
+             "color": a["color"], "intro": a["intro"], "chips": a["chips"],
+             "tagline": _TAGLINES.get(k, "")}
             for k, a in AGENTS.items()
         ]
     })
@@ -307,8 +352,19 @@ def result():
 @app.post("/api/reset")
 def reset():
     sid = _session_id()
-    key = (request.get_json(force=True) or {}).get("agent")
+    data = request.get_json(force=True) or {}
     histories = _session_histories(sid)
+    if data.get("all"):
+        # «Очистить сессию» — сбрасываем историю ВСЕХ агентов этой сессии.
+        for k in list(histories.keys()):
+            lock = _locks.get(k)
+            if lock:
+                with lock:  # не трогаем историю, пока агент думает
+                    histories[k] = []
+            else:
+                histories[k] = []
+        return jsonify({"ok": True, "cleared": "all"})
+    key = data.get("agent")
     if key in histories:
         with _locks[key]:  # не сбрасываем историю, пока агент думает
             histories[key] = []
@@ -393,6 +449,51 @@ def api_settings():
     return jsonify(status)
 
 
+def _probe(url, timeout=2.5):
+    """Живой GET-пробник локального сервиса: up/down + код. Без секретов."""
+    try:
+        r = requests.get(url, timeout=timeout)
+        return {"up": r.status_code < 500, "status": r.status_code}
+    except Exception as e:
+        return {"up": False, "error": type(e).__name__}
+
+
+@app.get("/api/health")
+def api_health():
+    """Единая health-сводка: конфигурация LLM/каналов (флаги) + ЖИВЫЕ пробы
+    локальных сервисов (n8n, bridge) + доступность Supabase. Безопасно —
+    только статусы, без ключей."""
+    cfg = _integration_status()
+    n8n_url = os.getenv("N8N_BASE_URL", "http://127.0.0.1:5678").rstrip("/")
+    bridge_port = os.getenv("N8N_BRIDGE_PORT", "5051")
+    # Supabase: проверяем только наличие конфига (живой запрос требует supa+сети).
+    try:
+        import sys as _sys
+        tdir = str(base.MILA_FOLDER / "tools")
+        if tdir not in _sys.path:
+            _sys.path.insert(0, tdir)
+        import supa
+        supa_state = {"configured": supa.available(), "can_write": supa.can_write()}
+    except Exception:
+        supa_state = {"configured": False, "can_write": False}
+
+    health = {
+        "gemini":   {"configured": cfg["gemini"]["configured"], "model": cfg["gemini"]["model"]},
+        "claude":   {"configured": cfg["claude"]["configured"]},
+        "telegram": {"configured": cfg["telegram"]["configured"]},
+        "instagram": {"configured": cfg["instagram"]["configured"], "flow": cfg["instagram"]["flow"]},
+        "supabase": supa_state,
+        "n8n":      _probe(f"{n8n_url}/healthz"),
+        "bridge":   _probe(f"http://127.0.0.1:{bridge_port}/health"),
+    }
+    # Сводный флаг: всё ли критичное поднято (LLM + хотя бы один канал).
+    health["ok"] = bool(
+        (health["gemini"]["configured"] or health["claude"]["configured"])
+        and health["telegram"]["configured"]
+    )
+    return jsonify(health)
+
+
 @app.get("/settings")
 def settings_page():
     return Response(SETTINGS_HTML, mimetype="text/html")
@@ -467,6 +568,169 @@ def ig_save_token():
         return jsonify({"ok": False, "error": "Не удалось проверить/сохранить токен — см. логи"}), 500
 
 
+# ─── Дашборд Людмилы: «готовят → она одобряет» ───────────
+# Собирает всё, что ждёт её решения, и даёт одну кнопку «Одобрить всё».
+_POST_QUEUE = base.MILA_FOLDER / "MILA-BUSINESS" / "02-content" / "post_queue.json"
+_OFFICE_ACTIONS = base.MILA_FOLDER / "reports" / "office_actions.json"
+_OVERRIDES_DIR = base.MILA_FOLDER / "MILA-BUSINESS" / "05-analytics" / "prompt_overrides"
+
+
+def _read_json_safe(path, default):
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except (FileNotFoundError, ValueError, OSError):
+        return default
+
+
+def _pending_posts():
+    """Посты в очереди, ждущие одобрения (не approved/published/needs_media)."""
+    q = _read_json_safe(_POST_QUEUE, [])
+    out = []
+    for it in q:
+        if it.get("status") in ("draft", "pending", "review", None):
+            out.append({"id": it.get("id"), "when": it.get("when"),
+                        "caption": (it.get("caption") or "")[:160],
+                        "has_media": bool((it.get("media_url") or "").strip())})
+    return out
+
+
+def _open_actions():
+    """Открытые задачи офиса от Стаса (office_actions.json)."""
+    acts = _read_json_safe(_OFFICE_ACTIONS, [])
+    return [{"id": a.get("id"), "title": a.get("title"), "assignee": a.get("assignee"),
+             "priority": a.get("priority"), "due": a.get("due")}
+            for a in acts if a.get("status") == "open"]
+
+
+def _recent_events(limit=12):
+    """Последние события из общей памяти (что агенты делали)."""
+    f = base.MILA_FOLDER / "mila-office" / "memory" / "events.jsonl"
+    try:
+        lines = f.read_text(encoding="utf-8").splitlines()[-limit:]
+    except (FileNotFoundError, OSError):
+        return []
+    out = []
+    for ln in reversed(lines):
+        try:
+            e = json.loads(ln)
+            out.append({"ts": e.get("ts", "")[:16].replace("T", " "),
+                        "kind": e.get("kind", "")})
+        except ValueError:
+            continue
+    return out
+
+
+def _pending_improvements():
+    """Активные улучшения Стаса (overrides) — что он предлагает агентам."""
+    out = []
+    if _OVERRIDES_DIR.exists():
+        for f in sorted(_OVERRIDES_DIR.glob("*.md")):
+            if f.name in ("README.md", "improvement_log.md"):
+                continue
+            txt = f.read_text(encoding="utf-8")
+            topics = re.findall(r"^##\s+(.+?)\s+—", txt, re.MULTILINE)
+            if topics:
+                out.append({"agent": f.stem, "topics": topics})
+    return out
+
+
+@app.get("/api/dashboard")
+def api_dashboard():
+    _session_id()
+    prof = {}
+    try:
+        prof = memory.read_profile().get("business", {})
+    except Exception:
+        pass
+    return jsonify({
+        "csrf": _csrf_token(),
+        "pending_posts": _pending_posts(),
+        "open_actions": _open_actions(),
+        "improvements": _pending_improvements(),
+        "events": _recent_events(),
+        "profile": {"phase": (lambda: _safe_phase())(),
+                    "followers": prof.get("ig_followers"),
+                    "goal": prof.get("goal")},
+    })
+
+
+def _safe_phase():
+    try:
+        return memory.current_phase()
+    except Exception:
+        return "—"
+
+
+@app.post("/api/approve-all")
+def api_approve_all():
+    """Главная кнопка: одобрить все черновики постов из очереди (status→approved).
+    Безопасно: только посты, у которых есть медиа; публикует их потом publish_due
+    по расписанию (не здесь). Улучшения Стаса и задачи — отдельными кнопками."""
+    q = _read_json_safe(_POST_QUEUE, [])
+    approved = 0
+    for it in q:
+        if it.get("status") in ("draft", "pending", "review", None):
+            if (it.get("media_url") or "").strip():
+                it["status"] = "approved"
+                approved += 1
+            else:
+                it["status"] = "needs_media"
+    if approved or q:
+        try:
+            Path(_POST_QUEUE).write_text(json.dumps(q, ensure_ascii=False, indent=2),
+                                         encoding="utf-8")
+        except OSError as e:
+            return jsonify({"ok": False, "error": str(e)}), 500
+    try:
+        memory.log_event("dashboard:approve_all", {"approved": approved})
+    except Exception:
+        pass
+    return jsonify({"ok": True, "approved": approved})
+
+
+@app.get("/dashboard")
+def dashboard_page():
+    return Response(DASHBOARD_HTML, mimetype="text/html")
+
+
+@app.get("/operator")
+def operator_page():
+    return Response(OPERATOR_HTML, mimetype="text/html")
+
+
+@app.get("/api/operator")
+def api_operator():
+    status = request.args.get("status") or None
+    tasks = memory.list_tasks(status)
+    approvals = memory.office_status().get("approvals", {})
+    pending_approvals = {
+        k: v for k, v in approvals.items()
+        if v.get("status") in {"pending", "missing", "changes_requested"}
+    }
+    return jsonify({
+        "ok": True,
+        "csrf": _csrf_token(),
+        "tasks": tasks,
+        "status": memory.office_status(limit=30),
+        "events": memory.recent_events(30),
+        "pending_approvals": pending_approvals,
+    })
+
+
+@app.post("/api/operator/task/<task_id>/<action>")
+def api_operator_task(task_id: str, action: str):
+    body = request.get_json(silent=True) or {}
+    if action == "retry":
+        rec = memory.retry_task(task_id, reset_attempts=bool(body.get("reset_attempts")))
+    elif action == "cancel":
+        rec = memory.cancel_task(task_id, reason=body.get("reason", "operator"))
+    elif action == "unblock":
+        rec = memory.unblock_task(task_id)
+    else:
+        return jsonify({"ok": False, "error": f"unknown action: {action}"}), 400
+    return jsonify({"ok": bool(rec.get("id")), "task": rec}), (200 if rec.get("id") else 400)
+
+
 @app.get("/")
 def index():
     return Response(INDEX_HTML, mimetype="text/html")
@@ -493,6 +757,17 @@ INDEX_HTML = r"""<!DOCTYPE html>
   .apill.active{background:rgba(255,255,255,.10)}
   .apill .em{font-size:20px;line-height:1}
   .apill .nm{font-size:9px;margin-top:3px;color:#cbb}
+  /* Тултип агента — position:fixed (через JS), чтобы не обрезался overflow сайдбара.
+     Появляется справа от кнопки при hover с задержкой 300ms. */
+  .atip{position:fixed;z-index:30;width:220px;max-width:220px;
+        background:#1E140F;border:1px solid #c08;border-radius:10px;padding:12px 14px;
+        box-shadow:0 4px 16px rgba(0,0,0,.3);pointer-events:none;
+        opacity:0;transform:translateX(-4px);transition:opacity .12s,transform .12s}
+  .atip.show{opacity:1;transform:translateX(0)}
+  .atip .h{font-size:12px;font-weight:bold;margin-bottom:6px}
+  .atip .d{font-size:11px;color:#c0a898;line-height:1.5;margin-bottom:8px}
+  .atip .cmds{display:flex;flex-wrap:wrap;gap:5px}
+  .atip .cmd{font-size:10px;padding:2px 7px;border-radius:10px;color:#e6d7cc}
   #main{flex:1;display:flex;flex-direction:column;min-width:0}
   header{background:var(--n);padding:16px 22px;display:flex;align-items:center;gap:14px}
   header .av{width:46px;height:46px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:20px;color:#fff;flex-shrink:0}
@@ -529,6 +804,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
       <div class="av" id="hav">M</div>
       <div class="ttl"><div class="nm" id="hname">…</div><div class="sub" id="hsub">@liudmyla.lykova · всегда онлайн</div></div>
       <button class="toggle" id="resetBtn">Очистить чат</button>
+      <button class="toggle" id="resetSessBtn" title="Очистить переписку со всеми агентами">Очистить сессию</button>
     </header>
     <div class="chips" id="chips"></div>
     <div id="chat"></div>
@@ -544,12 +820,22 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <script>
 let AGENTS=[], cur=null, CSRF='';
 
-function postJSON(url, payload){
-  return fetch(url,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':CSRF},
-    body:JSON.stringify(payload||{})});
+async function postJSON(url, payload){
+  const body=JSON.stringify(payload||{});
+  let r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':CSRF},body});
+  // 403 = протухший CSRF (напр. сервер перезапускали). Обновляем токен и пробуем ещё раз.
+  if(r.status===403){
+    try{ const m=await (await fetch('/api/meta')).json(); CSRF=m.csrf; }catch(e){}
+    r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':CSRF},body});
+  }
+  return r;
 }
 
 function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+// #RRGGBB + alpha → rgba(...) для полупрозрачного фона пилюль-команд в тултипе.
+function hexA(hex,a){const h=(hex||'#888').replace('#','');
+  const r=parseInt(h.substr(0,2),16),g=parseInt(h.substr(2,2),16),b=parseInt(h.substr(4,2),16);
+  return 'rgba('+r+','+g+','+b+','+a+')';}
 function md(s){
   s=esc(s);
   s=s.replace(/\*\*([^*]+)\*\*/g,'<b>$1</b>');
@@ -559,7 +845,13 @@ function md(s){
 }
 function agent(){return AGENTS.find(a=>a.key===cur);}
 
-function addMsg(text, me){
+// UI-переписка по агенту: {agentKey: [{text, me}, ...]}. Бэкенд хранит свою
+// историю (для контекста модели), а это — то, что видно на экране. Переключение
+// агентов больше НЕ стирает переписку: для каждого реплеим её из этого стора.
+const TRANSCRIPTS = {};
+
+// Рисует один пузырь в DOM (без записи в стор).
+function drawMsg(text, me){
   const chat=document.getElementById('chat');
   const a=agent();
   const row=document.createElement('div'); row.className='row'+(me?' me':'');
@@ -570,6 +862,12 @@ function addMsg(text, me){
   chat.scrollTop=chat.scrollHeight;
 }
 
+// Добавляет сообщение и в стор текущего агента, и на экран.
+function addMsg(text, me){
+  (TRANSCRIPTS[cur] = TRANSCRIPTS[cur] || []).push({text, me});
+  drawMsg(text, me);
+}
+
 function renderAgent(){
   const a=agent();
   document.getElementById('hname').textContent=a.name+' — '+a.role;
@@ -578,12 +876,15 @@ function renderAgent(){
   const ch=document.getElementById('chips'); ch.innerHTML='';
   a.chips.forEach(c=>{
     const el=document.createElement('button'); el.className='chip'; el.textContent=c.label;
+    el.title=c.prompt;  // подсказка при наведении — полный текст промпта
     el.onclick=()=>{ document.getElementById('inp').value=c.prompt; send(); };
     ch.appendChild(el);
   });
   document.querySelectorAll('.apill').forEach(p=>p.classList.toggle('active',p.dataset.k===cur));
-  document.getElementById('chat').innerHTML='';
-  addMsg(a.intro,false);
+  const chat=document.getElementById('chat'); chat.innerHTML='';
+  const hist=TRANSCRIPTS[cur];
+  if(hist && hist.length){ hist.forEach(m=>drawMsg(m.text, m.me)); }   // реплей сохранённой переписки
+  else { drawMsg(a.intro,false); }                                     // первый визит — только intro
 }
 
 function switchAgent(k){ cur=k; renderAgent(); }
@@ -597,6 +898,8 @@ async function send(){
   document.getElementById('send').disabled=true;
   try{
     const r=await postJSON('/api/chat',{agent:cur,message:text});
+    if(!r.ok){ addMsg('⚠️ Сервер вернул '+r.status+' (попробуй обновить страницу).',false);
+      t.style.display='none'; document.getElementById('send').disabled=false; return; }
     const j=await r.json();
     if(j.error){ addMsg('⚠️ Ошибка: '+j.error,false); }
     else {
@@ -617,7 +920,17 @@ async function send(){
 }
 
 async function resetChat(){
+  // Чистит переписку ТОЛЬКО текущего агента (UI + бэкенд-история).
   await postJSON('/api/reset',{agent:cur});
+  TRANSCRIPTS[cur]=[];
+  renderAgent();
+}
+
+async function resetSession(){
+  // Чистит переписку со ВСЕМИ агентами (UI + бэкенд-истории всех).
+  if(!confirm('Очистить переписку со всеми агентами?')) return;
+  await postJSON('/api/reset',{all:true});
+  for(const k in TRANSCRIPTS) delete TRANSCRIPTS[k];
   renderAgent();
 }
 
@@ -629,16 +942,47 @@ window.onload=async()=>{
   AGENTS.forEach(a=>{
     const p=document.createElement('div'); p.className='apill'; p.dataset.k=a.key;
     p.innerHTML='<div class="em">'+a.emoji+'</div><div class="nm">'+a.name+'</div>';
-    p.onclick=()=>switchAgent(a.key); side.appendChild(p);
+    p.onclick=()=>switchAgent(a.key);
+
+    // Тултип: заголовок (emoji·имя·роль) + описание + до 3 быстрых команд.
+    // Лежит в body (position:fixed) — иначе overflow сайдбара его обрежет.
+    const tip=document.createElement('div'); tip.className='atip';
+    tip.style.borderColor=a.color;
+    const cmds=(a.chips||[]).slice(0,3).map(c=>
+      '<span class="cmd" style="background:'+hexA(a.color,.15)+'">/'+
+      esc((c.label||'').toLowerCase())+'</span>').join('');
+    tip.innerHTML='<div class="h" style="color:'+a.color+'">'+a.emoji+' '+esc(a.name)+
+      ' · '+esc(a.role)+'</div>'+
+      '<div class="d">'+esc(a.tagline||'')+'</div>'+
+      (cmds?'<div class="cmds">'+cmds+'</div>':'');
+    document.body.appendChild(tip);
+
+    let timer=null;
+    p.addEventListener('mouseenter',()=>{
+      timer=setTimeout(()=>{
+        const r=p.getBoundingClientRect();
+        tip.style.left=(r.right+8)+'px';
+        // не вылезать за низ окна
+        tip.style.top=Math.min(r.top, window.innerHeight-tip.offsetHeight-8)+'px';
+        tip.classList.add('show');
+      },300);
+    });
+    p.addEventListener('mouseleave',()=>{ clearTimeout(timer); tip.classList.remove('show'); });
+
+    side.appendChild(p);
   });
   const sp=document.createElement('div'); sp.className='apill'; sp.title='Настройки и подключения';
   sp.innerHTML='<div class="em">⚙</div><div class="nm">Настройки</div>';
   sp.onclick=()=>window.open('/settings','_blank'); side.appendChild(sp);
+  const op=document.createElement('div'); op.className='apill'; op.title='Operator queue';
+  op.innerHTML='<div class="em">Q</div><div class="nm">Queue</div>';
+  op.onclick=()=>window.open('/operator','_blank'); side.appendChild(op);
   const inp=document.getElementById('inp');
   inp.addEventListener('keydown',e=>{ if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();} });
   inp.addEventListener('input',()=>{ inp.style.height='auto'; inp.style.height=Math.min(inp.scrollHeight,160)+'px'; });
   document.getElementById('send').onclick=send;
   document.getElementById('resetBtn').onclick=resetChat;
+  document.getElementById('resetSessBtn').onclick=resetSession;
   switchAgent(AGENTS[0].key);
 };
 </script>
@@ -723,6 +1067,207 @@ async function load(){
 }
 load();
 </script></div></body></html>"""
+
+
+# ─── Дашборд Людмилы (одна страница, кнопка «Одобрить всё») ──
+DASHBOARD_HTML = r"""<!DOCTYPE html>
+<html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MILA — Дашборд</title>
+<style>
+  :root{--t:#C4614A;--n:#1E140F;--c:#FAF6F1;--m:#F2EAE2;--u:#7A5E54;--b:#E0D0C8;--w:#fff;--g:#4a7a5e;}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:Georgia,'Times New Roman',serif;background:var(--c);color:var(--n)}
+  header{background:var(--n);padding:20px 28px}
+  header .t{font-size:11px;color:var(--t);letter-spacing:3px}
+  header .h{font-size:24px;color:var(--w);margin-top:4px}
+  header .s{font-size:12px;color:#9a8278;margin-top:4px}
+  .wrap{max-width:920px;margin:0 auto;padding:22px 20px 60px}
+  .hero{background:var(--w);border:2px solid var(--t);border-radius:16px;padding:20px;margin-bottom:20px;display:flex;align-items:center;gap:18px;flex-wrap:wrap}
+  .hero .sum{flex:1;min-width:220px;font-size:14px;color:var(--u);line-height:1.5}
+  .hero .sum b{color:var(--n)}
+  .approve{background:var(--t);color:#fff;border:none;border-radius:12px;padding:16px 30px;font-size:17px;font-family:inherit;cursor:pointer;font-weight:bold}
+  .approve:hover{filter:brightness(1.08)}
+  .approve:disabled{opacity:.5;cursor:default}
+  .card{background:var(--w);border:1px solid var(--b);border-radius:14px;padding:18px 20px;margin-bottom:16px}
+  .card h2{font-size:15px;margin:0 0 12px;color:var(--n)}
+  .card h2 .n{color:var(--t);font-size:13px;margin-left:6px}
+  .row{padding:9px 0;border-bottom:1px solid var(--m);font-size:13px;color:var(--n);line-height:1.5}
+  .row:last-child{border:0}
+  .row .meta{color:var(--u);font-size:11px}
+  .empty{color:var(--u);font-size:13px;font-style:italic}
+  .pill{display:inline-block;font-size:10px;padding:1px 8px;border-radius:8px;background:var(--m);color:var(--u);margin-right:6px}
+  .pill.p1{background:#f6dcd6;color:#a23a28}
+  .topbar{display:flex;gap:14px;margin-bottom:18px}
+  .topbar a{font-size:12px;color:var(--t);text-decoration:none}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  @media(max-width:640px){.grid{grid-template-columns:1fr}}
+  #toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:var(--g);color:#fff;padding:12px 22px;border-radius:10px;font-size:14px;display:none}
+</style></head>
+<body>
+<header>
+  <div class="t">УТРЕННИЙ ОБЗОР · MILA OFFICE</div>
+  <div class="h">Дашборд Людмилы</div>
+  <div class="s" id="sub">@liudmyla.lykova</div>
+</header>
+<div class="wrap">
+  <div class="topbar"><a href="/">← к агентам</a><a href="/settings">настройки</a></div>
+
+  <div class="hero">
+    <div class="sum" id="summary">Загружаю…</div>
+    <button class="approve" id="approveAll" disabled>Одобрить всё</button>
+  </div>
+
+  <div class="grid">
+    <div class="card"><h2>📸 Посты на одобрение <span class="n" id="cPosts"></span></h2><div id="posts"></div></div>
+    <div class="card"><h2>✅ Задачи офиса <span class="n" id="cActions"></span></h2><div id="actions"></div></div>
+  </div>
+  <div class="grid">
+    <div class="card"><h2>⚙️ Улучшения от Стаса <span class="n" id="cImpr"></span></h2><div id="impr"></div></div>
+    <div class="card"><h2>🕑 Что было ночью <span class="n" id="cEv"></span></h2><div id="events"></div></div>
+  </div>
+</div>
+<div id="toast"></div>
+<script>
+let CSRF="";
+function esc(s){return (s||"").replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+function toast(m){const t=document.getElementById('toast');t.textContent=m;t.style.display='block';setTimeout(()=>t.style.display='none',3500);}
+
+async function load(){
+  const d=await (await fetch('/api/dashboard')).json();
+  CSRF=d.csrf;
+  const ph=d.profile||{};
+  document.getElementById('sub').textContent='@liudmyla.lykova · фаза: '+(ph.phase||'—')+(ph.followers?(' · '+ph.followers+' подписчиков'):'');
+  const np=d.pending_posts.length, na=d.open_actions.length, ni=d.improvements.length;
+  document.getElementById('summary').innerHTML=
+    'Доброе утро! На одобрении: <b>'+np+'</b> пост(ов), <b>'+na+'</b> задач(и), <b>'+ni+'</b> улучшений агентов. '
+    +(np?'Жми «Одобрить всё» — одобренные посты опубликуются по расписанию.':'Новых постов на одобрение нет.');
+  const btn=document.getElementById('approveAll'); btn.disabled = np===0;
+
+  // posts
+  document.getElementById('cPosts').textContent=np||'';
+  document.getElementById('posts').innerHTML = np ? d.pending_posts.map(p=>
+    '<div class="row">'+esc(p.caption||'(без текста)')
+    +'<div class="meta">'+(p.when?('⏰ '+esc(p.when)+' · '):'')+(p.has_media?'медиа ✓':'⚠️ нет медиа')+'</div></div>'
+  ).join('') : '<div class="empty">Пусто</div>';
+
+  // actions
+  document.getElementById('cActions').textContent=na||'';
+  document.getElementById('actions').innerHTML = na ? d.open_actions.map(a=>
+    '<div class="row"><span class="pill '+((a.priority||'').toLowerCase()==='p1'?'p1':'')+'">'+esc(a.priority||'P?')+'</span>'
+    +esc(a.title||'')+'<div class="meta">'+esc(a.assignee||'')+(a.due?(' · до '+esc(a.due)):'')+'</div></div>'
+  ).join('') : '<div class="empty">Открытых задач нет</div>';
+
+  // improvements
+  document.getElementById('cImpr').textContent=ni||'';
+  document.getElementById('impr').innerHTML = ni ? d.improvements.map(i=>
+    '<div class="row"><b>'+esc(i.agent)+'</b><div class="meta">темы: '+i.topics.map(esc).join(', ')+'</div></div>'
+  ).join('') : '<div class="empty">Активных улучшений нет</div>';
+
+  // events
+  document.getElementById('cEv').textContent=d.events.length||'';
+  document.getElementById('events').innerHTML = d.events.length ? d.events.map(e=>
+    '<div class="row">'+esc(e.kind)+'<div class="meta">'+esc(e.ts)+'</div></div>'
+  ).join('') : '<div class="empty">Событий нет</div>';
+}
+
+document.getElementById('approveAll').onclick=async()=>{
+  const btn=document.getElementById('approveAll'); btn.disabled=true;
+  try{
+    const r=await fetch('/api/approve-all',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':CSRF},body:'{}'});
+    const d=await r.json();
+    if(d.ok){ toast('Одобрено постов: '+d.approved+'. Опубликуются по расписанию.'); load(); }
+    else { toast('Ошибка: '+(d.error||'?')); btn.disabled=false; }
+  }catch(e){ toast('Сеть недоступна'); btn.disabled=false; }
+};
+load();
+</script></body></html>"""
+
+
+OPERATOR_HTML = r"""<!DOCTYPE html>
+<html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MILA OFFICE · Operator</title>
+<style>
+  :root{--t:#C4614A;--n:#1E140F;--c:#FAF6F1;--m:#F2EAE2;--u:#7A5E54;--b:#E0D0C8;--w:#fff;--g:#4A7A5E;--r:#A8412C}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:Georgia,'Times New Roman',serif;background:var(--c);color:var(--n)}
+  header{background:var(--n);padding:18px 24px;color:#fff}
+  header .k{font-size:11px;color:var(--t);letter-spacing:2px}
+  header .h{font-size:24px;margin-top:4px}
+  .wrap{max-width:1120px;margin:0 auto;padding:20px}
+  .top{display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap}
+  .top a,.top button{font-family:inherit;font-size:13px;color:var(--t);background:transparent;border:1px solid var(--b);border-radius:8px;padding:8px 12px;text-decoration:none;cursor:pointer}
+  .tabs{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px}
+  .tab{background:#fff;border:1px solid var(--b);border-radius:8px;padding:8px 12px;font-family:inherit;cursor:pointer;color:var(--n)}
+  .tab.on{border-color:var(--t);color:var(--t)}
+  .grid{display:grid;grid-template-columns:2fr 1fr;gap:16px}
+  .card{background:#fff;border:1px solid var(--b);border-radius:8px;padding:16px}
+  h2{font-size:16px;margin:0 0 12px}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th{text-align:left;color:var(--u);font-weight:normal;border-bottom:1px solid var(--b);padding:7px}
+  td{border-bottom:1px solid var(--m);padding:8px;vertical-align:top}
+  .pill{display:inline-block;border-radius:6px;padding:2px 7px;background:var(--m);font-size:11px;color:var(--u)}
+  .pending{color:#8B6B10}.running{color:#2B5278}.failed{color:var(--r)}.done{color:var(--g)}.cancelled{color:#777}.awaiting_approval{color:#8B4513}
+  .actions{display:flex;gap:6px;flex-wrap:wrap}
+  .actions button{border:1px solid var(--b);background:#fff;border-radius:7px;padding:5px 8px;font-size:12px;font-family:inherit;cursor:pointer}
+  .actions button:hover{border-color:var(--t);color:var(--t)}
+  .muted{color:var(--u);font-size:12px}
+  .event{border-bottom:1px solid var(--m);padding:8px 0;font-size:13px}
+  .event:last-child{border:0}
+  .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--g);color:#fff;border-radius:8px;padding:10px 16px;display:none}
+  @media(max-width:760px){.grid{grid-template-columns:1fr} th:nth-child(4),td:nth-child(4){display:none}}
+</style></head><body>
+<header><div class="k">MILA OFFICE · OPERATOR</div><div class="h">Queue Control</div></header>
+<div class="wrap">
+  <div class="top"><a href="/">Agents</a><a href="/dashboard">Dashboard</a><a href="/settings">Settings</a><button onclick="load()">Refresh</button></div>
+  <div class="tabs" id="tabs"></div>
+  <div class="grid">
+    <div class="card"><h2>Tasks</h2><div id="tasks"></div></div>
+    <div>
+      <div class="card"><h2>Pending Approvals</h2><div id="approvals"></div></div>
+      <div class="card"><h2>Recent Events</h2><div id="events"></div></div>
+    </div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+<script>
+let CSRF='', FILTER='';
+const statuses=['','pending','running','awaiting_approval','failed','done','cancelled'];
+function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+function toast(s){const t=document.getElementById('toast');t.textContent=s;t.style.display='block';setTimeout(()=>t.style.display='none',2200);}
+function tabName(s){return s||'all';}
+function renderTabs(){
+  document.getElementById('tabs').innerHTML=statuses.map(s=>'<button class="tab '+(s===FILTER?'on':'')+'" onclick="FILTER=\''+s+'\';load()">'+tabName(s)+'</button>').join('');
+}
+async function act(id, action){
+  const body=action==='retry'?{reset_attempts:false}:action==='cancel'?{reason:'operator'}:{};
+  const r=await fetch('/api/operator/task/'+encodeURIComponent(id)+'/'+action,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':CSRF},body:JSON.stringify(body)});
+  const d=await r.json();
+  toast(d.ok ? action+' '+id : (d.error||'error'));
+  load();
+}
+function actions(t){
+  if(t.status==='running') return '';
+  return '<div class="actions"><button onclick="act(\''+esc(t.id)+'\',\'retry\')">retry</button><button onclick="act(\''+esc(t.id)+'\',\'unblock\')">unblock</button><button onclick="act(\''+esc(t.id)+'\',\'cancel\')">cancel</button></div>';
+}
+async function load(){
+  renderTabs();
+  const url='/api/operator'+(FILTER?'?status='+encodeURIComponent(FILTER):'');
+  const d=await (await fetch(url)).json();
+  CSRF=d.csrf;
+  const tasks=d.tasks||[];
+  document.getElementById('tasks').innerHTML=tasks.length?'<table><thead><tr><th>ID</th><th>Pipeline</th><th>Status</th><th>Dedupe</th><th>Next</th><th></th></tr></thead><tbody>'+tasks.map(t=>
+    '<tr><td>'+esc(t.id)+'<div class="muted">try '+esc(t.attempts||0)+'</div></td><td>'+esc(t.pipeline)+'</td><td><span class="'+esc(t.status)+'">'+esc(t.status)+'</span></td><td><span class="pill">'+esc(t.dedupe_key||'—')+'</span></td><td>'+esc(t.next_run_at||'')+'</td><td>'+actions(t)+'</td></tr>'
+  ).join('')+'</tbody></table>':'<div class="muted">No tasks</div>';
+  const approvals=d.pending_approvals||{};
+  const ak=Object.keys(approvals);
+  document.getElementById('approvals').innerHTML=ak.length?ak.map(k=>'<div class="event"><b>'+esc(k)+'</b><div class="muted">'+esc(approvals[k].status)+' · '+esc(approvals[k].comment||'')+'</div></div>').join(''):'<div class="muted">No pending approvals</div>';
+  const ev=d.events||[];
+  document.getElementById('events').innerHTML=ev.length?ev.map(e=>'<div class="event">'+esc(e.kind)+'<div class="muted">'+esc(e.ts)+' · '+esc(JSON.stringify(e.payload||{}))+'</div></div>').join(''):'<div class="muted">No events</div>';
+}
+load();
+</script></body></html>"""
 
 
 def _open_browser():

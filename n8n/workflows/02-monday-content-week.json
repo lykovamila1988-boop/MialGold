@@ -1,0 +1,59 @@
+{
+  "name": "MILA — Monday content week",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{"field": "cronExpression", "expression": "0 6 * * 1"}]
+        }
+      },
+      "id": "b1b2c3d4-0002-4000-8000-000000000001",
+      "name": "Monday 06:00 UTC",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:5051/v1/context",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\"event\": \"weekly_content\", \"data\": {}}",
+        "options": {"timeout": 120000}
+      },
+      "id": "b1b2c3d4-0002-4000-8000-000000000002",
+      "name": "Set context",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [480, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:5051/v1/pipeline/content_week",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [{"name": "notify", "value": "1"}]
+        },
+        "options": {"timeout": 3600000}
+      },
+      "id": "b1b2c3d4-0002-4000-8000-000000000003",
+      "name": "Pipeline content_week",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [720, 300]
+    }
+  ],
+  "connections": {
+    "Monday 06:00 UTC": {
+      "main": [[{"node": "Set context", "type": "main", "index": 0}]]
+    },
+    "Set context": {
+      "main": [[{"node": "Pipeline content_week", "type": "main", "index": 0}]]
+    }
+  },
+  "active": false,
+  "settings": {"executionOrder": "v1"},
+  "meta": {"templateCredsSetupCompleted": true}
+}
