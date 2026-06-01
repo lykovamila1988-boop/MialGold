@@ -21,6 +21,7 @@ except Exception:
 
 import json
 import datetime
+from statistics import median as stats_median
 from pathlib import Path
 from collections import defaultdict
 
@@ -46,28 +47,14 @@ def fmt(n):
     return f"{int(round(n)):,}".replace(",", " ")
 
 
-def classify(caption):
-    """Грубая тематическая категория по тексту поста (приоритет сверху вниз)."""
-    c = (caption or "").lower()
-    rel = any(w in c for w in ["мужчин", "отношени", "партн", " пара", "пары",
-                               "ради мужчины", "он хотел", "счастливых пар"])
-    kids = any(w in c for w in ["дет", "сын", "ребён", "ребен", "первенц",
-                                "школ", "день матери", "мама двоих"])
-    # «отношения» важнее «детей», если речь про мужчину/женщину в паре
-    if rel and not (kids and "мужчин" not in c and "отношени" not in c):
-        return "Отношения (пара, мужчина/женщина)"
-    if kids:
-        return "Материнство / дети"
-    if any(w in c for w in ["самооценк", "любовь к себе", "люблю себя",
-                            "возвраща", "выгорани", "работа над собой",
-                            "контролировать", "контролирует", "тревог",
-                            "беречь", "берегём", "терпe", "терпеть", "опора",
-                            "себя", "идеальной", "настоящей"]):
-        return "Самоценность / возвращение к себе"
-    if any(w in c for w in ["спорт", "калори", "танцева", "микрофон",
-                            "канад", "подруг", "prada", "хобби"]):
-        return "Лайфстайл / личное"
-    return "Другое"
+def _median(values):
+    vals = [v for v in values if v is not None]
+    return stats_median(vals) if vals else 0
+
+
+# Классификация темы вынесена в общий tools/theme.py (один источник истины с
+# pipeline.py) — re-export, чтобы внешние вызовы make_report.classify(...) работали.
+from theme import classify
 
 
 def load(path):
@@ -80,6 +67,12 @@ def load(path):
         p["er"] = (p["eng"] / p["reach"]) if p["reach"] else 0
         d = datetime.date.fromisoformat(p["date"])
         p["wd"] = WD_RU[d.weekday()]
+        ts = p.get("timestamp") or ""
+        p["published_time"] = p.get("published_time") or (ts[11:16] if len(ts) >= 16 else "")
+        try:
+            p["published_hour"] = int(p["published_time"][:2]) if p["published_time"] else None
+        except ValueError:
+            p["published_hour"] = None
         p["theme"] = classify(p.get("caption", ""))
         # короткий заголовок из первой строки
         first = (p.get("caption", "") or "").splitlines()
@@ -136,10 +129,13 @@ def build(data, month, out_path):
     tot_comm = sum(p["comments"] for p in data)
     avg_reach = tot_reach / n
     reach_sorted = sorted([p["reach"] for p in data])
-    median = reach_sorted[n // 2] if n % 2 else (
-        reach_sorted[n // 2 - 1] + reach_sorted[n // 2]) / 2
+    median = _median(reach_sorted)
+    viral_threshold = max(40000, median * 10)
+    non_viral = [p for p in data if p["reach"] < viral_threshold]
+    baseline_median = _median([p["reach"] for p in non_viral]) if non_viral else median
 
     by_reach = sorted(data, key=lambda p: p["reach"], reverse=True)
+    viral_posts = [p for p in data if p["reach"] >= viral_threshold]
     top3 = by_reach[:3]
     top3_reach = sum(p["reach"] for p in top3)
     top1 = by_reach[0]
@@ -171,6 +167,7 @@ def build(data, month, out_path):
             ["Суммарный охват", fmt(tot_reach)],
             ["Средний охват на пост", fmt(avg_reach)],
             ["Медианный охват (типичный пост)", fmt(median)],
+            [f"Базовая медиана без выбросов ({len(non_viral)} постов)", fmt(baseline_median)],
             ["Суммарно лайков", fmt(tot_likes)],
             ["Суммарно комментариев", fmt(tot_comm)],
             ["Лучший пост по охвату", f"{fmt(top1['reach'])}  ({top1['date']})"],
@@ -184,7 +181,7 @@ def build(data, month, out_path):
         f"3 поста дали {fmt(top3_reach)} охвата — это "
         f"{round(top3_reach / tot_reach * 100)}% всего месячного охвата. "
         f"При этом средний охват ({fmt(avg_reach)}) сильно раздут вирусными видео, "
-        f"а медианный (типичный) пост собрал всего {fmt(median)}. "
+        f"а базовая медиана без выбросов — {fmt(baseline_median)}. "
         "Аккаунт растёт не на объёме, а на нескольких сильных Reels — "
         "именно их тему и подачу нужно усиливать, а базовый охват подтягивать."
     )
@@ -275,6 +272,50 @@ def build(data, month, out_path):
     styled_table(doc, ["День", "Постов", "Ср. охват", "Макс. охват"], wd_rows,
                  widths=[1.6, 0.9, 1.3, 1.3])
     doc.add_paragraph()
+    timed = [p for p in data if p.get("published_hour") is not None]
+    if timed:
+        def _time_window(items):
+            if not items:
+                return "нет данных"
+            hours = [p["published_hour"] for p in items if p.get("published_hour") is not None]
+            if not hours:
+                return "нет данных"
+            return f"{min(hours):02d}:00–{max(hours):02d}:59, медиана {int(_median(hours)):02d}:00"
+
+        viral_timed = [p for p in viral_posts if p.get("published_hour") is not None]
+        weak_timed = [p for p in non_viral if p.get("published_hour") is not None]
+        styled_table(
+            doc,
+            ["Группа", "Постов", "Дни", "Часы публикации", "Медиана охвата"],
+            [
+                [
+                    "Виральные",
+                    len(viral_timed),
+                    ", ".join(sorted({p["wd"] for p in viral_timed})) or "нет данных",
+                    _time_window(viral_timed),
+                    fmt(_median([p["reach"] for p in viral_timed])),
+                ],
+                [
+                    "Без выбросов",
+                    len(weak_timed),
+                    ", ".join(sorted({p["wd"] for p in weak_timed})) or "нет данных",
+                    _time_window(weak_timed),
+                    fmt(_median([p["reach"] for p in weak_timed])),
+                ],
+            ],
+            widths=[1.3, 0.7, 1.8, 1.8, 1.1],
+        )
+        doc.add_paragraph(
+            f"Следующий анализ должен отдельно проверить время публикации: сравнить день и час "
+            f"{len(viral_timed)} виральных постов против {len(weak_timed)} постов без выбросов. "
+            "Если оба вирала вышли в один и тот же сильный слот, это не просто удачный хук, а кандидат на правило публикации."
+        )
+    else:
+        doc.add_paragraph(
+            "В текущей выгрузке нет точного часа публикации. Скрипт get_analytics.py теперь сохраняет timestamp и published_time, "
+            "поэтому следующий отчёт сможет сравнить день и час виралов против слабых постов."
+        )
+    doc.add_paragraph()
     doc.add_paragraph(
         "Что делать: в следующем месяце фиксируй время публикации каждого Reels "
         "(например, вечер 18:00–20:00 — пик женской аудитории) и в выгрузку добавь "
@@ -297,16 +338,16 @@ def build(data, month, out_path):
     # ---- 6. Прогноз ----
     H(doc, "6. Прогноз: 4 Reels в месяц на лучшие темы")
     rel = [p for p in reels if p["theme"].startswith("Отношения")]
-    viral = [p for p in data if p["reach"] >= 40000]
+    viral = viral_posts
     rel_solid = [p for p in rel if p not in viral]
-    solid_avg = (sum(p["reach"] for p in rel_solid) / len(rel_solid)) if rel_solid else avg_reach
+    solid_avg = _median([p["reach"] for p in rel_solid]) if rel_solid else baseline_median
     viral_avg = (sum(p["reach"] for p in viral) / len(viral)) if viral else avg_reach
     viral_rate = len(viral) / len(reels)
 
     doc.add_paragraph(
         f"Логика расчёта — на реальных числах месяца: из {len(reels)} Reels «выстрелили» "
         f"{len(viral)} (≈{round(viral_rate*100)}%); типичный крепкий Reel про отношения без "
-        f"вируса собирал ≈{fmt(solid_avg)} охвата, средний вирусный — ≈{fmt(viral_avg)}. "
+        f"вируса собирал ≈{fmt(solid_avg)} охвата по медиане без выбросов, средний вирусный — ≈{fmt(viral_avg)}. "
         "Если делать 4 точечных Reels в месяц строго на проверенных темах:"
     )
     pess = 4 * solid_avg

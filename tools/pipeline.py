@@ -39,6 +39,22 @@ QUEUE = ROOT / "MILA-BUSINESS" / "02-content" / "post_queue.json"
 POSTS_DIR = ROOT / "MILA-BUSINESS" / "02-content" / "posts"
 POST_HOUR_UTC = 10  # Пн–Пт 10:00 UTC (≈13:00 МСК) — как в content-plan
 
+# Общая память офиса (mila-office/memory.py) — для 48ч-петли обратной связи.
+# Импортируем по пути, как это делает n8n_bridge; если недоступна — петля просто
+# не регистрирует пост (не ломая публикацию).
+_OFFICE = ROOT / "mila-office"
+if str(_OFFICE) not in sys.path:
+    sys.path.insert(0, str(_OFFICE))
+try:
+    import memory as office_memory
+except Exception:
+    office_memory = None
+
+
+# Тема поста — общий источник истины tools/theme.py (тот же, что в make_report),
+# чтобы «тема→охват» в published.json и в отчёте не расходились.
+from theme import classify as _classify_theme
+
 
 # ─── очередь ─────────────────────────────────────────────
 def _load_queue():
@@ -195,6 +211,16 @@ def publish_due():
             item["published_id"] = res.get("id")
             item["published_at"] = now.isoformat()
             published += 1
+            # 48ч-петля: регистрируем пост, чтобы measure_due через ≥48ч дописал охват.
+            if office_memory and item.get("published_id"):
+                try:
+                    office_memory.record_published(
+                        media_id=str(item["published_id"]),
+                        theme=_classify_theme(item.get("caption", "")),
+                        hook=(item.get("caption", "") or "").splitlines()[0] if item.get("caption") else "",
+                    )
+                except Exception as e:
+                    print(f"[48h] не записал в память: {e}", file=sys.stderr)
         except GraphError as e:
             item["status"] = "failed"; item["error"] = str(e)[:200]
         changed += 1
@@ -203,9 +229,53 @@ def publish_due():
     print(f"📤 Опубликовано: {published}. Обновлено записей: {changed}. (UTC {now:%Y-%m-%d %H:%M})")
 
 
+def measure_due(hours=48):
+    """48ч-петля: для постов старше `hours` тянет охват/лайки/комменты из IG и
+    пишет в память (save_measurement). Так у Стаса появляются данные «тема→охват»."""
+    from _common import graph_get
+    if office_memory is None:
+        sys.exit("memory.py недоступна — нечего измерять")
+    due = office_memory.due_for_measure(hours)
+    if not due:
+        print(f"📭 Нет постов старше {hours}ч для измерения.")
+        return
+    cfg = load_config()
+    measured = 0
+    for row in due:
+        mid = row["media_id"]
+        metrics = {}
+        try:
+            base = graph_get(cfg, mid, params={"fields": "like_count,comments_count"})
+            metrics["likes"] = base.get("like_count", 0)
+            metrics["comments"] = base.get("comments_count", 0)
+        except GraphError:
+            pass
+        try:
+            ins = graph_get(cfg, f"{mid}/insights", params={"metric": "reach"})
+            for it in ins.get("data", []):
+                # values может прийти пустым списком ([]), не только отсутствовать —
+                # тогда [{}] как default не спасает (а [][0] кинул бы IndexError).
+                values = it.get("values") or []
+                first = values[0] if isinstance(values, list) and values else {}
+                reach = first.get("value") if isinstance(first, dict) else None
+                if reach is not None:
+                    metrics["reach"] = reach
+        except GraphError as e:
+            print(f"  ⚠ {mid}: insights/reach недоступен ({e})")
+        if metrics.get("reach") is None:
+            metrics.setdefault("reach", None)
+            print(f"  ⚠ {mid}: охват не получен (reach=None) — метрика записана неполной.")
+        office_memory.save_measurement(mid, metrics)
+        measured += 1
+        print(f"  ✓ {mid} [{row.get('theme')}] reach={metrics.get('reach')} "
+              f"likes={metrics.get('likes')} comments={metrics.get('comments')}")
+    print(f"📊 Измерено постов: {measured}. (через ≥{hours}ч после публикации)")
+
+
 def main():
     p = argparse.ArgumentParser(description="Авто-постинг Instagram (MILA GOLD)")
-    p.add_argument("mode", choices=["content_week", "status", "approve", "publish_due"])
+    p.add_argument("mode", choices=["content_week", "status", "approve",
+                                    "publish_due", "measure_due"])
     p.add_argument("id", nargs="?", type=int, help="id поста для approve")
     args = p.parse_args()
     if args.mode == "content_week":
@@ -218,6 +288,8 @@ def main():
         approve(args.id)
     elif args.mode == "publish_due":
         publish_due()
+    elif args.mode == "measure_due":
+        measure_due()
 
 
 if __name__ == "__main__":

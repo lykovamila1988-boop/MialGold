@@ -12,9 +12,9 @@ try:
 except Exception:
     pass
 
-import os, json, subprocess
+import os, json, subprocess, re, time
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 import anthropic
 import requests
@@ -41,6 +41,8 @@ ANTHROPIC_KEY   = os.getenv("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_KEY")
 GEMINI_KEY      = os.getenv("GEMINI_KEY") or os.getenv("GOOGLE_API_KEY")
 TELEGRAM_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_API")
 GUMROAD_TOKEN   = os.getenv("GUMROAD_ACCESS_TOKEN") or os.getenv("GUMROAD_TOKEN")
+GAMMA_API_KEY   = os.getenv("GAMMA_API_KEY")
+GAMMA_THEME_ID  = os.getenv("GAMMA_THEME_ID")
 
 # Аутентификация Claude. У Messages API нет публичного OAuth-флоу — это либо ключ
 # (x-api-key), либо bearer-токен для шлюза/прокси перед Anthropic. Если задан
@@ -111,6 +113,7 @@ _CONFIG = {
     "GEMINI_KEY":           GEMINI_KEY,
     "TELEGRAM_BOT_TOKEN":   TELEGRAM_TOKEN,
     "GUMROAD_ACCESS_TOKEN": GUMROAD_TOKEN,
+    "GAMMA_API_KEY":       GAMMA_API_KEY,
     "IG_ACCESS_TOKEN":      INSTAGRAM_TOKEN,
     "IG_USER_ID":           INSTAGRAM_ACC,
 }
@@ -244,6 +247,134 @@ def log(category: str, message: str):
     with open(p, "a", encoding="utf-8") as f:
         f.write(f"[{datetime.now():%Y-%m-%d %H:%M}] {message}\n")
 
+
+def _slugify(value: str, fallback: str = "gamma_document") -> str:
+    value = (value or "").strip().lower()
+    translit = str.maketrans({
+        "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e",
+        "ж": "zh", "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m",
+        "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
+        "ф": "f", "х": "h", "ц": "ts", "ч": "ch", "ш": "sh", "щ": "sch",
+        "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya",
+    })
+    value = value.translate(translit)
+    value = re.sub(r"[^a-z0-9]+", "_", value).strip("_")
+    return value[:80] or fallback
+
+
+class GammaError(RuntimeError):
+    pass
+
+
+def _gamma_headers() -> dict:
+    require_config("GAMMA_API_KEY")
+    return {
+        "Content-Type": "application/json",
+        "X-API-KEY": GAMMA_API_KEY,
+    }
+
+
+def create_gamma_document(
+    title: str,
+    content: str,
+    format: str = "document",
+    export: str = "pdf",
+) -> dict:
+    """Create a branded Gamma document/presentation and download the exported PDF.
+
+    Gamma API is async: POST /generations returns generationId, then we poll
+    GET /generations/{id} until status is completed or failed.
+    """
+    title = (title or "").strip()
+    content = (content or "").strip()
+    format = (format or "document").strip().lower()
+    export = (export or "pdf").strip().lower()
+    if not title:
+        raise GammaError("title is required")
+    if not content:
+        raise GammaError("content is required")
+    if format not in {"document", "presentation", "social", "webpage"}:
+        raise GammaError("format must be document, presentation, social, or webpage")
+    if export not in {"pdf", "pptx", "png"}:
+        raise GammaError("export must be pdf, pptx, or png")
+
+    payload = {
+        "inputText": content,
+        "textMode": "preserve",
+        "format": format,
+        "exportAs": export,
+        "additionalInstructions": f"Title: {title}\nLanguage: ru",
+    }
+    if GAMMA_THEME_ID:
+        payload["themeId"] = GAMMA_THEME_ID
+
+    base_url = "https://public-api.gamma.app/v1.0"
+    try:
+        started = requests.post(
+            f"{base_url}/generations",
+            headers=_gamma_headers(),
+            json=payload,
+            timeout=30,
+        )
+    except requests.RequestException as e:
+        raise GammaError(f"Gamma API request failed: {e}") from e
+    if started.status_code not in (200, 201):
+        raise GammaError(f"Gamma API {started.status_code}: {(started.text or '')[:500]}")
+    generation_id = (started.json() or {}).get("generationId")
+    if not generation_id:
+        raise GammaError("Gamma did not return generationId")
+
+    timeout_sec = int(os.getenv("GAMMA_TIMEOUT_SEC", "900"))
+    poll_sec = int(os.getenv("GAMMA_POLL_SEC", "10"))
+    deadline = time.time() + timeout_sec
+    status_payload = {}
+    while time.time() < deadline:
+        try:
+            polled = requests.get(
+                f"{base_url}/generations/{generation_id}",
+                headers=_gamma_headers(),
+                timeout=30,
+            )
+        except requests.RequestException as e:
+            raise GammaError(f"Gamma polling failed: {e}") from e
+        if polled.status_code != 200:
+            raise GammaError(f"Gamma polling {polled.status_code}: {(polled.text or '')[:500]}")
+        status_payload = polled.json() or {}
+        status = status_payload.get("status")
+        if status == "completed":
+            break
+        if status == "failed":
+            raise GammaError(f"Gamma generation failed: {json.dumps(status_payload, ensure_ascii=False)[:800]}")
+        time.sleep(max(5, poll_sec))
+    else:
+        raise GammaError(f"Gamma generation timed out after {timeout_sec}s: {generation_id}")
+
+    gamma_url = status_payload.get("gammaUrl")
+    export_url = status_payload.get("exportUrl")
+    if not export_url:
+        raise GammaError("Gamma completed but did not return exportUrl")
+
+    products_dir = MILA_FOLDER / "products"
+    products_dir.mkdir(parents=True, exist_ok=True)
+    suffix = "pdf" if export == "pdf" else export
+    local_path = products_dir / f"{_slugify(title)}.{suffix}"
+    try:
+        download = requests.get(export_url, timeout=120)
+    except requests.RequestException as e:
+        raise GammaError(f"Gamma export download failed: {e}") from e
+    if download.status_code != 200:
+        raise GammaError(f"Gamma export download {download.status_code}: {(download.text or '')[:300]}")
+    local_path.write_bytes(download.content)
+
+    return {
+        "generation_id": generation_id,
+        "gamma_url": gamma_url,
+        "pdf_url": export_url if export == "pdf" else "",
+        "export_url": export_url,
+        "local_path": str(local_path),
+        "credits": status_payload.get("credits"),
+    }
+
 # ─── РЕЕСТР БАЗОВЫХ ИНСТРУМЕНТОВ ──────────────────────────
 # Раньше каждый из 8 агентов дублировал JSON-схемы read_file/write_file/list_files
 # (~25 строк) и одинаковую ветку handle() (~10 строк). Теперь схемы собирает
@@ -287,13 +418,98 @@ def agent_overrides(key: str) -> str:
     except (FileNotFoundError, OSError):
         return ""
 
+# memory.py не зависит от base (только stdlib) — импорт безопасен, цикла нет.
+try:
+    import memory as _memory
+except Exception as _e:
+    _memory = None  # без memory профиль/фаза просто не подмешиваются
+    # Один раз сообщаем оператору, ПОЧЕМУ контекст офиса не подмешивается — иначе
+    # «фаза/профиль исчезли» молча и непонятно, что чинить (сломан memory.py?).
+    print(f"[base] memory.py недоступна ({type(_e).__name__}: {_e}) — "
+          f"контекст офиса (фаза/профиль) не будет подмешан в промпты.", file=sys.stderr)
+
+_phase_warned = False  # чтобы предупреждение о сбое чтения фазы печаталось 1 раз/процесс
+
+# Что фаза означает для поведения. Общая часть видна всем агентам; для Стаса
+# (manager) — отдельная инструкция, т.к. в фазе 0 он стратег запуска, а не аналитик.
+_PHASE_NOTE = {
+    "cold_start": "Данных почти нет — опирайся на экспертные defaults из профиля, "
+                  "не выдумывай статистику и не ссылайся на «данные», которых нет.",
+    "learning":   "Данные начали накапливаться (первые посты измерены) — выводы возможны, "
+                  "но осторожные: помечай их как предварительные.",
+    "analysis":   "Данных достаточно для выводов — опирайся на реальные метрики, а не на defaults.",
+}
+# Фазовый АКЦЕНТ для Стаса — НЕ ограничение его роли. Он всегда аналитик+стратег
+# со всеми инструментами (measure_metrics, app_review, db_query, improve_agent…);
+# фаза лишь подсказывает, на что делать упор и насколько уверенно говорить о данных.
+_MANAGER_PHASE_NOTE = {
+    "cold_start": "Сейчас фаза запуска: данных мало, поэтому ДОПОЛНИТЕЛЬНО к обычной работе "
+                  "делай упор на построение воронки и первые сигналы. Анализ, метрики и "
+                  "техобзор (measure_metrics/app_review/db_query) применяй как обычно — просто "
+                  "честно помечай, где выводы предварительные из-за нехватки данных.",
+    "learning":   "Появляются первые точки данных — анализируй как обычно, но выводы помечай "
+                  "как предварительные и готовь почву для режима полного анализа.",
+    "analysis":   "Данных достаточно: анализируй на полную — узкие места по реальным метрикам, "
+                  "улучшения агентов на данных.",
+}
+
+def _phase_preamble(key: str) -> str:
+    """Профиль офиса + текущая фаза → текст-преамбула к SYSTEM. Доходит до ВСЕХ
+    агентов, потому что compose_system вызывается и из webapp, и из pipeline.
+    Возвращает '' если memory недоступна."""
+    if _memory is None:
+        return ""
+    try:
+        phase = _memory.current_phase()
+        profile = _memory.read_profile()
+    except Exception as e:
+        global _phase_warned
+        if not _phase_warned:
+            _phase_warned = True
+            print(f"[base] не удалось прочитать фазу/профиль ({type(e).__name__}: {e}) — "
+                  f"промпты идут без контекста офиса. Проверь memory/profile.json.",
+                  file=sys.stderr)
+        return ""
+    biz = profile.get("business", {}) if isinstance(profile, dict) else {}
+    lines = [
+        f"# ─ Контекст офиса (фаза: {phase}) ─",
+        _PHASE_NOTE.get(phase, ""),
+    ]
+    if key == "manager":
+        lines.append(_MANAGER_PHASE_NOTE.get(phase, ""))
+    # Краткие defaults — то, на что агент опирается, пока нет статистики.
+    if biz:
+        topics = ", ".join(biz.get("top_topics", []) or [])
+        facts = [
+            f"подписчиков ~{biz['ig_followers']}" if biz.get("ig_followers") else "",
+            f"лучший формат: {biz['best_content_type']}" if biz.get("best_content_type") else "",
+            f"лучшее время: {biz['best_posting_time']}" if biz.get("best_posting_time") else "",
+            f"рабочие темы: {topics}" if topics else "",
+        ]
+        facts = [f for f in facts if f]
+        if facts:
+            lines.append("Defaults профиля — " + "; ".join(facts) + ".")
+        if biz.get("note"):
+            lines.append(biz["note"])
+    # Позиционирование — чем Людмила отличается от рынка. Это читает КАЖДЫЙ агент
+    # (особенно Марина при написании поста): держать голос и отстройку.
+    pos = profile.get("positioning", {}) if isinstance(profile, dict) else {}
+    if pos.get("summary"):
+        lines.append("Отстройка от рынка: " + pos["summary"])
+    return "\n".join(l for l in lines if l)
+
 def compose_system(key: str, system: str) -> str:
-    """SYSTEM агента + активные улучшения от Стаса. Так офис эволюционирует без
-    правки кода агентов."""
+    """SYSTEM агента + контекст фазы офиса + активные улучшения от Стаса.
+    Так офис эволюционирует без правки кода агентов и полезен с первого дня
+    (фаза cold_start подмешивает экспертные defaults вместо пустоты)."""
+    out = system
+    preamble = _phase_preamble(key).strip()
+    if preamble:
+        out += "\n\n" + preamble
     extra = agent_overrides(key).strip()
     if extra:
-        return system + ("\n\n# ─ Улучшения от Стаса (data-driven; см. improvement_log) ─\n" + extra)
-    return system
+        out += "\n\n# ─ Улучшения от Стаса (data-driven; см. improvement_log) ─\n" + extra
+    return out
 
 # ─── AGENT RUNNER ────────────────────────────────────────
 def _anthropic_configured() -> bool:
@@ -351,6 +567,32 @@ def _gemini_contents(messages: list) -> list:
     return contents
 
 
+def _parse_retry_after(value: str | None, fallback: float, cap: float = 30.0) -> float:
+    """Retry-After по RFC 7231: либо целые секунды, либо HTTP-дата. Возвращает
+    паузу в секундах, ограниченную [0, cap]; на мусоре/пустоте — fallback.
+    Раньше брали только .isdigit() → пробелы и дата-формат игнорировались, и
+    мы спали слишком мало, усугубляя rate-limit."""
+    if not value:
+        return fallback
+    raw = value.strip()
+    try:
+        secs = float(raw)              # «120», « 120 »
+    except ValueError:
+        try:                            # HTTP-дата → дельта от текущего момента
+            from email.utils import parsedate_to_datetime
+            dt = parsedate_to_datetime(raw)
+            if dt is None:
+                return fallback
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            secs = (dt - datetime.now(dt.tzinfo)).total_seconds()
+        except (TypeError, ValueError):
+            return fallback
+    if secs <= 0:
+        return fallback
+    return min(secs, cap)
+
+
 def _gemini_generate(contents: list, system: str, tools: list) -> dict:
     require_config("GEMINI_KEY")
     payload = {
@@ -362,9 +604,37 @@ def _gemini_generate(contents: list, system: str, tools: list) -> dict:
     if converted_tools:
         payload["tools"] = converted_tools
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
-    resp = requests.post(url, params={"key": GEMINI_KEY}, json=payload, timeout=90)
-    resp.raise_for_status()
-    return resp.json()
+    # Транзиентные сбои Google (503 Service Unavailable, 429 rate limit, 500) —
+    # не падаем с первой попытки, а повторяем с экспоненциальной паузой.
+    import time as _time
+    last = None
+    for attempt in range(4):
+        try:
+            resp = requests.post(url, params={"key": GEMINI_KEY}, json=payload, timeout=90)
+        except requests.RequestException as e:
+            last = e
+            _time.sleep(1.5 * (attempt + 1))
+            continue
+        if resp.status_code in (429, 500, 502, 503, 504):
+            last = resp
+            if attempt < 3:
+                # Respect Retry-After если есть (секунды ИЛИ HTTP-дата), иначе
+                # backoff 1.5/3/4.5с. Капаем, чтобы битый заголовок не усыпил надолго.
+                backoff = 1.5 * (attempt + 1)
+                _time.sleep(_parse_retry_after(resp.headers.get("Retry-After"), backoff))
+                continue
+        # ВАЖНО: НЕ raise_for_status() — он кладёт полный URL (с ?key=…) в текст
+        # исключения, а тот уходит в логи. Бросаем своё сообщение БЕЗ ключа.
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"Gemini API {resp.status_code} ({GEMINI_MODEL}): "
+                f"{(resp.text or '')[:300]}")
+        return resp.json()
+    # все попытки исчерпаны
+    code = getattr(last, "status_code", "network")
+    raise RuntimeError(
+        f"Gemini API недоступен после 4 попыток (последний код: {code}, модель {GEMINI_MODEL}). "
+        f"Обычно это временный сбой Google (503) — попробуй ещё раз через минуту.")
 
 
 def _run_gemini_agent(system: str, tools: list, tool_handler, messages: list, history: list):

@@ -23,6 +23,31 @@ except ImportError:
 TOOLS_DIR = Path(__file__).resolve().parent
 ENV_PATH = TOOLS_DIR / ".env"
 REPORTS_DIR = TOOLS_DIR.parent / "reports"
+OFFICE_DIR = TOOLS_DIR.parent / "mila-office"
+if str(OFFICE_DIR) not in sys.path:
+    sys.path.insert(0, str(OFFICE_DIR))
+try:
+    import memory as office_memory
+except Exception:
+    office_memory = None
+
+def _int_env(name: str, default: int) -> int:
+    """Читает целочисленную env-переменную, не роняя импорт на мусорном значении.
+    _common.py импортируется всеми скриптами (и mila-office/base.py как graph_api),
+    поэтому кривой IG_RATE_LIMIT_PER_HOUR не должен ломать весь тулинг — берём
+    default и пишем предупреждение в stderr."""
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return int(raw.strip())
+    except ValueError:
+        print(f"[config] {name}={raw!r} — не целое число, использую {default}.", file=sys.stderr)
+        return default
+
+
+IG_RATE_LIMIT_PER_HOUR = _int_env("IG_RATE_LIMIT_PER_HOUR", 200)
+THREADS_RATE_LIMIT_PER_HOUR = _int_env("THREADS_RATE_LIMIT_PER_HOUR", 200)
 
 # Слова-триггеры заявок (лид в комментариях/ответах). Раньше дублировались
 # в get_analytics.py и get_threads.py — теперь единый источник.
@@ -40,6 +65,28 @@ class ConfigError(Exception):
 
 class GraphError(Exception):
     """Ошибка сетевого вызова или ответа Graph/Threads API."""
+
+
+def _rate_limit_key(cfg) -> tuple[str, int]:
+    base = (cfg.get("base") or "").lower()
+    if "threads" in base:
+        return "threads_api", THREADS_RATE_LIMIT_PER_HOUR
+    return "instagram_api", IG_RATE_LIMIT_PER_HOUR
+
+
+def check_rate_limit(cfg, cost=1):
+    """Shared local limiter before Graph/Threads calls."""
+    if office_memory is None:
+        return {"ok": True, "api": "memory_unavailable"}
+    api, limit = _rate_limit_key(cfg)
+    res = office_memory.shared_rate_limit(api, limit, cost=cost)
+    if not res.get("ok"):
+        retry = res.get("retry_after", 0)
+        raise GraphError(
+            f"Rate limit {api}: {res.get('used')}/{res.get('limit')} requests in the last hour. "
+            f"Retry after ~{retry}s."
+        )
+    return res
 
 
 # ─── HTTP-СЕССИЯ С РЕТРАЯМИ ───────────────────────────────
@@ -161,6 +208,7 @@ def api_base(cfg):
 
 def graph_get(cfg, path, params=None):
     """GET-запрос к Graph API. Возвращает JSON или завершает работу с ошибкой."""
+    check_rate_limit(cfg)
     params = dict(params or {})
     params.setdefault("access_token", cfg["token"])
     url = f"{api_base(cfg)}/{path.lstrip('/')}"
@@ -188,6 +236,7 @@ def graph_get_all(cfg, path, params=None, max_items=None):
         if not next_url:
             return items
         try:
+            check_rate_limit(cfg)
             r = _session.get(next_url, timeout=30)
             data = r.json()
         except requests.RequestException as e:
@@ -197,6 +246,7 @@ def graph_get_all(cfg, path, params=None, max_items=None):
 
 def graph_post(cfg, path, data=None):
     """POST-запрос к Graph API."""
+    check_rate_limit(cfg)
     payload = dict(data or {})
     payload.setdefault("access_token", cfg["token"])
     url = f"{api_base(cfg)}/{path.lstrip('/')}"
