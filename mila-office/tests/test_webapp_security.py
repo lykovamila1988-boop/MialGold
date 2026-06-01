@@ -78,12 +78,14 @@ def test_operator_page_and_actions(monkeypatch, tmp_path):
 
     page = client.get("/operator")
     assert page.status_code == 200
-    assert b"Queue Control" in page.data
+    # Страница операторской очереди переведена на русский («Управление очередью»).
+    assert "Управление очередью".encode("utf-8") in page.data
 
     data = client.get("/api/operator").get_json()
     assert data["ok"] is True
     assert data["tasks"][0]["dedupe_key"] == "cw:test"
     assert "events" in data
+    assert "supervisor" in data
 
     response = client.post(
         f"/api/operator/task/{task['id']}/retry",

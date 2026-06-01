@@ -121,6 +121,27 @@ def test_operator_retry_cancel_unblock(monkeypatch, tmp_path):
     assert unblocked["status"] == "pending"
 
 
+def test_task_artifact_and_supervisor_status(monkeypatch, tmp_path):
+    memory = _fresh_memory(monkeypatch, tmp_path)
+    task = memory.enqueue_task("content_week", priority=2)
+    done = memory.complete_task(task["id"], "done", {
+        "artifact": {
+            "summary": "content plan ready",
+            "files": ["plan.txt"],
+            "urls": [],
+            "next_actions": [],
+        }
+    })
+    assert done["artifact"]["summary"] == "content plan ready"
+
+    status = memory.write_supervisor_status({
+        "status": "ok",
+        "services": {"webapp": {"up": True}},
+    })
+    assert status["ok"] is True
+    assert memory.read_supervisor_status()["services"]["webapp"]["up"] is True
+
+
 def test_approval_latest_status(monkeypatch, tmp_path):
     memory = _fresh_memory(monkeypatch, tmp_path)
     memory.set_approval("post_mon", "victoria", "rejected", "weak hook")

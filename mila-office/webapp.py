@@ -30,6 +30,7 @@ import uuid
 import webbrowser
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -634,6 +635,50 @@ def _pending_improvements():
     return out
 
 
+def _latest_report(prefix):
+    """Свежий reports/<prefix>_*.json (по mtime) или None."""
+    rep = base.MILA_FOLDER / "reports"
+    files = sorted(rep.glob(f"{prefix}_*.json"), key=lambda p: p.stat().st_mtime)
+    if not files:
+        return None
+    return _read_json_safe(files[-1], None)
+
+
+def _kpi():
+    """Реальные метрики для дашборда. Берём из свежих отчётов + БД; ничего не
+    выдумываем — чего нет, отдаём None (фронт покажет «—»)."""
+    kpi = {"followers": None, "avg_reach": None, "er": None,
+           "sales": None, "phase": _safe_phase(), "goal": None}
+    try:
+        prof = memory.read_profile().get("business", {})
+        kpi["goal"] = prof.get("goal")
+        kpi["followers"] = prof.get("ig_followers")
+    except Exception:
+        pass
+    # followers — из свежего account-отчёта, точнее профиля
+    acc = _latest_report("account")
+    if isinstance(acc, dict) and acc.get("followers_count"):
+        kpi["followers"] = acc["followers_count"]
+    # avg reach / ER — из свежего posts-отчёта
+    pr = _latest_report("posts")
+    posts = (pr.get("posts") if isinstance(pr, dict) else pr) or []
+    posts = [p for p in posts if isinstance(p, dict)]
+    if posts:
+        reaches = [p.get("reach") or 0 for p in posts]
+        avg_reach = round(sum(reaches) / len(reaches)) if reaches else 0
+        kpi["avg_reach"] = avg_reach
+        # ER = средняя вовлечённость / охват
+        if avg_reach:
+            eng = [p.get("engagement") or (p.get("likes", 0) + p.get("comments", 0)) for p in posts]
+            kpi["er"] = round(100 * (sum(eng) / len(eng)) / avg_reach, 1)
+    # продажи — из БД (purchases), как в фазе
+    try:
+        kpi["sales"] = memory.sales_count()
+    except Exception:
+        pass
+    return kpi
+
+
 @app.get("/api/dashboard")
 def api_dashboard():
     _session_id()
@@ -648,10 +693,61 @@ def api_dashboard():
         "open_actions": _open_actions(),
         "improvements": _pending_improvements(),
         "events": _recent_events(),
+        "kpi": _kpi(),
         "profile": {"phase": (lambda: _safe_phase())(),
                     "followers": prof.get("ig_followers"),
                     "goal": prof.get("goal")},
     })
+
+
+@app.post("/api/dashboard/post/<post_id>/<action>")
+def api_dashboard_post(post_id, action):
+    """Действие по ОДНОМУ посту из очереди: approve | reject.
+    approve → status=approved (опубликует publish_due); reject → status=rejected."""
+    if action not in ("approve", "reject"):
+        return jsonify({"ok": False, "error": "unknown action"}), 400
+    q = _read_json_safe(_POST_QUEUE, [])
+    found = None
+    for it in q:
+        if str(it.get("id")) == str(post_id):
+            if action == "approve":
+                if not (it.get("media_url") or "").strip():
+                    it["status"] = "needs_media"
+                    found = "needs_media"
+                else:
+                    it["status"] = "approved"; found = "approved"
+            else:
+                it["status"] = "rejected"; found = "rejected"
+            break
+    if found is None:
+        return jsonify({"ok": False, "error": "post not found"}), 404
+    try:
+        Path(_POST_QUEUE).write_text(json.dumps(q, ensure_ascii=False, indent=2), encoding="utf-8")
+        memory.log_event("dashboard:post", {"id": post_id, "result": found})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": True, "result": found})
+
+
+@app.post("/api/dashboard/action/<action_id>/close")
+def api_dashboard_action_close(action_id):
+    """Закрыть ОДНУ задачу офиса (status open → done)."""
+    acts = _read_json_safe(_OFFICE_ACTIONS, [])
+    found = False
+    for a in acts:
+        if str(a.get("id")) == str(action_id) and a.get("status") == "open":
+            a["status"] = "done"
+            a["closed"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+            found = True
+            break
+    if not found:
+        return jsonify({"ok": False, "error": "action not found"}), 404
+    try:
+        Path(_OFFICE_ACTIONS).write_text(json.dumps(acts, ensure_ascii=False, indent=2), encoding="utf-8")
+        memory.log_event("dashboard:action_close", {"id": action_id})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": True})
 
 
 def _safe_phase():
@@ -712,6 +808,7 @@ def api_operator():
         "csrf": _csrf_token(),
         "tasks": tasks,
         "status": memory.office_status(limit=30),
+        "supervisor": memory.read_supervisor_status(),
         "events": memory.recent_events(30),
         "pending_approvals": pending_approvals,
     })
@@ -974,8 +1071,8 @@ window.onload=async()=>{
   const sp=document.createElement('div'); sp.className='apill'; sp.title='Настройки и подключения';
   sp.innerHTML='<div class="em">⚙</div><div class="nm">Настройки</div>';
   sp.onclick=()=>window.open('/settings','_blank'); side.appendChild(sp);
-  const op=document.createElement('div'); op.className='apill'; op.title='Operator queue';
-  op.innerHTML='<div class="em">Q</div><div class="nm">Queue</div>';
+  const op=document.createElement('div'); op.className='apill'; op.title='Очередь задач (оператор)';
+  op.innerHTML='<div class="em">Q</div><div class="nm">Очередь</div>';
   op.onclick=()=>window.open('/operator','_blank'); side.appendChild(op);
   const inp=document.getElementById('inp');
   inp.addEventListener('keydown',e=>{ if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();} });
@@ -1075,43 +1172,80 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>MILA — Дашборд</title>
 <style>
-  :root{--t:#C4614A;--n:#1E140F;--c:#FAF6F1;--m:#F2EAE2;--u:#7A5E54;--b:#E0D0C8;--w:#fff;--g:#4a7a5e;}
+  :root{--t:#C4614A;--n:#1E140F;--c:#FAF6F1;--m:#F2EAE2;--u:#7A5E54;--b:#E0D0C8;--w:#fff;--g:#4A7A5E;--r:#A8412C}
   *{box-sizing:border-box}
-  body{margin:0;font-family:Georgia,'Times New Roman',serif;background:var(--c);color:var(--n)}
-  header{background:var(--n);padding:20px 28px}
-  header .t{font-size:11px;color:var(--t);letter-spacing:3px}
-  header .h{font-size:24px;color:var(--w);margin-top:4px}
-  header .s{font-size:12px;color:#9a8278;margin-top:4px}
-  .wrap{max-width:920px;margin:0 auto;padding:22px 20px 60px}
-  .hero{background:var(--w);border:2px solid var(--t);border-radius:16px;padding:20px;margin-bottom:20px;display:flex;align-items:center;gap:18px;flex-wrap:wrap}
+  html,body{height:100%}
+  body{margin:0;font-family:Georgia,'Times New Roman',serif;background:var(--c);color:var(--n);
+       height:100vh;display:flex;flex-direction:column;overflow:hidden}
+  header{background:var(--n);padding:16px 24px;flex-shrink:0}
+  header .k{font-size:11px;color:var(--t);letter-spacing:2px}
+  header .h{font-size:22px;color:var(--w);margin-top:4px;font-weight:bold}
+  header .s{font-size:12px;color:#9a8278;margin-top:3px}
+  .wrap{flex:1;max-width:1100px;width:100%;margin:0 auto;padding:18px 22px;display:flex;
+        flex-direction:column;min-height:0;overflow-y:auto}
+  .top{display:flex;align-items:center;gap:10px;margin-bottom:16px;flex-wrap:wrap;flex-shrink:0}
+  .top a,.top button{font-family:inherit;font-size:13px;color:var(--t);background:rgba(196,97,74,.08);
+       border:1px solid var(--b);border-radius:8px;padding:8px 14px;text-decoration:none;cursor:pointer;transition:.15s}
+  .top a:hover,.top button:hover{border-color:var(--t);background:rgba(196,97,74,.16)}
+  .top .spacer{flex:1}
+  .top .auto{color:var(--u);font-size:12px;background:none;border:0;cursor:default}
+  /* KPI */
+  .kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:18px;flex-shrink:0}
+  .kpi{background:var(--w);border:1px solid var(--b);border-radius:14px;padding:14px 16px}
+  .kpi .v{font-size:24px;font-weight:bold;color:var(--n)}
+  .kpi .l{font-size:11px;color:var(--u);margin-top:4px;text-transform:uppercase;letter-spacing:.5px}
+  .kpi .d{font-size:11px;color:var(--g);margin-top:2px}
+  @media(max-width:860px){.kpis{grid-template-columns:repeat(2,1fr)}}
+  /* hero */
+  .hero{background:var(--w);border:2px solid var(--t);border-radius:16px;padding:18px 20px;margin-bottom:18px;
+        display:flex;align-items:center;gap:18px;flex-wrap:wrap;flex-shrink:0}
   .hero .sum{flex:1;min-width:220px;font-size:14px;color:var(--u);line-height:1.5}
   .hero .sum b{color:var(--n)}
-  .approve{background:var(--t);color:#fff;border:none;border-radius:12px;padding:16px 30px;font-size:17px;font-family:inherit;cursor:pointer;font-weight:bold}
+  .approve{background:var(--t);color:#fff;border:none;border-radius:12px;padding:14px 28px;font-size:16px;
+       font-family:inherit;cursor:pointer;font-weight:bold;transition:.15s}
   .approve:hover{filter:brightness(1.08)}
-  .approve:disabled{opacity:.5;cursor:default}
-  .card{background:var(--w);border:1px solid var(--b);border-radius:14px;padding:18px 20px;margin-bottom:16px}
-  .card h2{font-size:15px;margin:0 0 12px;color:var(--n)}
+  .approve:disabled{opacity:.45;cursor:default}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  @media(max-width:760px){.grid{grid-template-columns:1fr}}
+  .card{background:var(--w);border:1px solid var(--b);border-radius:14px;padding:18px 20px;margin-bottom:16px;
+        display:flex;flex-direction:column;min-height:0}
+  .card h2{font-size:15px;margin:0 0 12px;color:var(--n);flex-shrink:0}
   .card h2 .n{color:var(--t);font-size:13px;margin-left:6px}
-  .row{padding:9px 0;border-bottom:1px solid var(--m);font-size:13px;color:var(--n);line-height:1.5}
+  .card .body{overflow-y:auto;max-height:300px;min-height:0}
+  .row{padding:9px 0;border-bottom:1px solid var(--m);font-size:13px;color:var(--n);line-height:1.5;
+       display:flex;justify-content:space-between;gap:10px;align-items:flex-start}
   .row:last-child{border:0}
-  .row .meta{color:var(--u);font-size:11px}
+  .row .txt{flex:1;min-width:0;word-break:break-word}
+  .row .meta{color:var(--u);font-size:11px;margin-top:3px}
   .empty{color:var(--u);font-size:13px;font-style:italic}
   .pill{display:inline-block;font-size:10px;padding:1px 8px;border-radius:8px;background:var(--m);color:var(--u);margin-right:6px}
   .pill.p1{background:#f6dcd6;color:#a23a28}
-  .topbar{display:flex;gap:14px;margin-bottom:18px}
-  .topbar a{font-size:12px;color:var(--t);text-decoration:none}
-  .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-  @media(max-width:640px){.grid{grid-template-columns:1fr}}
-  #toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:var(--g);color:#fff;padding:12px 22px;border-radius:10px;font-size:14px;display:none}
+  .ib{display:flex;gap:5px;flex-shrink:0}
+  .ib button{border:1px solid var(--b);background:var(--w);border-radius:8px;padding:4px 9px;font-size:12px;
+       font-family:inherit;cursor:pointer;color:var(--n);transition:.15s}
+  .ib button:hover{border-color:var(--t);color:var(--t)}
+  .ib button.ok:hover{border-color:var(--g);color:var(--g)}
+  .ib button.no:hover{border-color:var(--r);color:var(--r)}
+  .body::-webkit-scrollbar{width:10px}.body::-webkit-scrollbar-thumb{background:var(--b);border-radius:6px}
+  .body::-webkit-scrollbar-track{background:transparent}
+  #toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:var(--g);color:#fff;
+       padding:12px 22px;border-radius:10px;font-size:14px;display:none;z-index:50}
 </style></head>
 <body>
 <header>
-  <div class="t">УТРЕННИЙ ОБЗОР · MILA OFFICE</div>
+  <div class="k">УТРЕННИЙ ОБЗОР · MILA OFFICE</div>
   <div class="h">Дашборд Людмилы</div>
   <div class="s" id="sub">@liudmyla.lykova</div>
 </header>
 <div class="wrap">
-  <div class="topbar"><a href="/">← к агентам</a><a href="/settings">настройки</a></div>
+  <div class="top">
+    <a href="/">Агенты</a><a href="/operator">Очередь</a><a href="/settings">Настройки</a>
+    <button onclick="load()">Обновить</button>
+    <span class="spacer"></span>
+    <span class="auto" id="auto">авто-обновление: 30с</span>
+  </div>
+
+  <div class="kpis" id="kpis"></div>
 
   <div class="hero">
     <div class="sum" id="summary">Загружаю…</div>
@@ -1119,12 +1253,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </div>
 
   <div class="grid">
-    <div class="card"><h2>📸 Посты на одобрение <span class="n" id="cPosts"></span></h2><div id="posts"></div></div>
-    <div class="card"><h2>✅ Задачи офиса <span class="n" id="cActions"></span></h2><div id="actions"></div></div>
+    <div class="card"><h2>📸 Посты на одобрение <span class="n" id="cPosts"></span></h2><div class="body" id="posts"></div></div>
+    <div class="card"><h2>✅ Задачи офиса <span class="n" id="cActions"></span></h2><div class="body" id="actions"></div></div>
   </div>
   <div class="grid">
-    <div class="card"><h2>⚙️ Улучшения от Стаса <span class="n" id="cImpr"></span></h2><div id="impr"></div></div>
-    <div class="card"><h2>🕑 Что было ночью <span class="n" id="cEv"></span></h2><div id="events"></div></div>
+    <div class="card"><h2>⚙️ Улучшения от Стаса <span class="n" id="cImpr"></span></h2><div class="body" id="impr"></div></div>
+    <div class="card"><h2>🕑 Что было ночью <span class="n" id="cEv"></span></h2><div class="body" id="events"></div></div>
   </div>
 </div>
 <div id="toast"></div>
@@ -1132,46 +1266,15 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 let CSRF="";
 function esc(s){return (s||"").replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 function toast(m){const t=document.getElementById('toast');t.textContent=m;t.style.display='block';setTimeout(()=>t.style.display='none',3500);}
+function nf(n){return (n==null)?'—':String(n).replace(/\B(?=(\d{3})+(?!\d))/g,' ');}
 
-async function load(){
-  const d=await (await fetch('/api/dashboard')).json();
-  CSRF=d.csrf;
-  const ph=d.profile||{};
-  document.getElementById('sub').textContent='@liudmyla.lykova · фаза: '+(ph.phase||'—')+(ph.followers?(' · '+ph.followers+' подписчиков'):'');
-  const np=d.pending_posts.length, na=d.open_actions.length, ni=d.improvements.length;
-  document.getElementById('summary').innerHTML=
-    'Доброе утро! На одобрении: <b>'+np+'</b> пост(ов), <b>'+na+'</b> задач(и), <b>'+ni+'</b> улучшений агентов. '
-    +(np?'Жми «Одобрить всё» — одобренные посты опубликуются по расписанию.':'Новых постов на одобрение нет.');
-  const btn=document.getElementById('approveAll'); btn.disabled = np===0;
-
-  // posts
-  document.getElementById('cPosts').textContent=np||'';
-  document.getElementById('posts').innerHTML = np ? d.pending_posts.map(p=>
-    '<div class="row">'+esc(p.caption||'(без текста)')
-    +'<div class="meta">'+(p.when?('⏰ '+esc(p.when)+' · '):'')+(p.has_media?'медиа ✓':'⚠️ нет медиа')+'</div></div>'
-  ).join('') : '<div class="empty">Пусто</div>';
-
-  // actions
-  document.getElementById('cActions').textContent=na||'';
-  document.getElementById('actions').innerHTML = na ? d.open_actions.map(a=>
-    '<div class="row"><span class="pill '+((a.priority||'').toLowerCase()==='p1'?'p1':'')+'">'+esc(a.priority||'P?')+'</span>'
-    +esc(a.title||'')+'<div class="meta">'+esc(a.assignee||'')+(a.due?(' · до '+esc(a.due)):'')+'</div></div>'
-  ).join('') : '<div class="empty">Открытых задач нет</div>';
-
-  // improvements
-  document.getElementById('cImpr').textContent=ni||'';
-  document.getElementById('impr').innerHTML = ni ? d.improvements.map(i=>
-    '<div class="row"><b>'+esc(i.agent)+'</b><div class="meta">темы: '+i.topics.map(esc).join(', ')+'</div></div>'
-  ).join('') : '<div class="empty">Активных улучшений нет</div>';
-
-  // events
-  document.getElementById('cEv').textContent=d.events.length||'';
-  document.getElementById('events').innerHTML = d.events.length ? d.events.map(e=>
-    '<div class="row">'+esc(e.kind)+'<div class="meta">'+esc(e.ts)+'</div></div>'
-  ).join('') : '<div class="empty">Событий нет</div>';
+async function item(url){
+  const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':CSRF},body:'{}'});
+  const d=await r.json();
+  if(d.ok){ toast(d.result==='needs_media'?'⚠️ Нет медиа — нужен файл':'Готово'); load(); }
+  else toast('Ошибка: '+(d.error||'?'));
 }
-
-document.getElementById('approveAll').onclick=async()=>{
+async function approveAll(){
   const btn=document.getElementById('approveAll'); btn.disabled=true;
   try{
     const r=await fetch('/api/approve-all',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':CSRF},body:'{}'});
@@ -1179,92 +1282,186 @@ document.getElementById('approveAll').onclick=async()=>{
     if(d.ok){ toast('Одобрено постов: '+d.approved+'. Опубликуются по расписанию.'); load(); }
     else { toast('Ошибка: '+(d.error||'?')); btn.disabled=false; }
   }catch(e){ toast('Сеть недоступна'); btn.disabled=false; }
-};
+}
+
+async function load(){
+  let d; try{ d=await (await fetch('/api/dashboard')).json(); }catch(e){ return; }
+  CSRF=d.csrf;
+  const ph=d.profile||{}, k=d.kpi||{};
+  document.getElementById('sub').textContent='@liudmyla.lykova · фаза: '+(k.phase||ph.phase||'—');
+
+  // KPI карточки
+  document.getElementById('kpis').innerHTML=[
+    {v:nf(k.followers),l:'подписчики'},
+    {v:nf(k.avg_reach),l:'ср. охват'},
+    {v:(k.er!=null?k.er+'%':'—'),l:'вовлечённость'},
+    {v:nf(k.sales),l:'продажи'},
+    {v:(k.phase||'—'),l:'фаза',d:k.goal?('цель: '+esc(k.goal)):''},
+  ].map(x=>'<div class="kpi"><div class="v">'+x.v+'</div><div class="l">'+x.l+'</div>'+(x.d?'<div class="d">'+x.d+'</div>':'')+'</div>').join('');
+
+  const np=d.pending_posts.length, na=d.open_actions.length, ni=d.improvements.length;
+  document.getElementById('summary').innerHTML=
+    'Доброе утро! На одобрении: <b>'+np+'</b> пост(ов), <b>'+na+'</b> задач(и), <b>'+ni+'</b> улучшений агентов. '
+    +(np?'Жми «Одобрить всё» или решай по каждому посту.':'Новых постов на одобрение нет.');
+  document.getElementById('approveAll').disabled = np===0;
+
+  // посты + кнопки на каждый
+  document.getElementById('cPosts').textContent=np||'';
+  document.getElementById('posts').innerHTML = np ? d.pending_posts.map(p=>
+    '<div class="row"><div class="txt">'+esc(p.caption||'(без текста)')
+    +'<div class="meta">'+(p.when?('⏰ '+esc(p.when)+' · '):'')+(p.has_media?'медиа ✓':'⚠️ нет медиа')+'</div></div>'
+    +'<div class="ib"><button class="ok" onclick="item(\'/api/dashboard/post/'+encodeURIComponent(p.id)+'/approve\')">одобрить</button>'
+    +'<button class="no" onclick="item(\'/api/dashboard/post/'+encodeURIComponent(p.id)+'/reject\')">скрыть</button></div></div>'
+  ).join('') : '<div class="empty">Пусто</div>';
+
+  // задачи + кнопка закрыть
+  document.getElementById('cActions').textContent=na||'';
+  document.getElementById('actions').innerHTML = na ? d.open_actions.map(a=>
+    '<div class="row"><div class="txt"><span class="pill '+((a.priority||'').toLowerCase()==='p1'?'p1':'')+'">'+esc(a.priority||'P?')+'</span>'
+    +esc(a.title||'')+'<div class="meta">'+esc(a.assignee||'')+(a.due?(' · до '+esc(a.due)):'')+'</div></div>'
+    +'<div class="ib"><button class="ok" onclick="item(\'/api/dashboard/action/'+encodeURIComponent(a.id)+'/close\')">закрыть</button></div></div>'
+  ).join('') : '<div class="empty">Открытых задач нет</div>';
+
+  // улучшения
+  document.getElementById('cImpr').textContent=ni||'';
+  document.getElementById('impr').innerHTML = ni ? d.improvements.map(i=>
+    '<div class="row"><div class="txt"><b>'+esc(i.agent)+'</b><div class="meta">темы: '+i.topics.map(esc).join(', ')+'</div></div></div>'
+  ).join('') : '<div class="empty">Активных улучшений нет</div>';
+
+  // события
+  document.getElementById('cEv').textContent=d.events.length||'';
+  document.getElementById('events').innerHTML = d.events.length ? d.events.map(e=>
+    '<div class="row"><div class="txt">'+esc(e.kind)+'<div class="meta">'+esc(e.ts)+'</div></div></div>'
+  ).join('') : '<div class="empty">Событий нет</div>';
+}
+
+document.getElementById('approveAll').onclick=approveAll;
 load();
+setInterval(load, 30000);  // авто-обновление каждые 30с
 </script></body></html>"""
 
 
 OPERATOR_HTML = r"""<!DOCTYPE html>
 <html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>MILA OFFICE · Operator</title>
+<title>MILA OFFICE · Очередь</title>
 <style>
   :root{--t:#C4614A;--n:#1E140F;--c:#FAF6F1;--m:#F2EAE2;--u:#7A5E54;--b:#E0D0C8;--w:#fff;--g:#4A7A5E;--r:#A8412C}
   *{box-sizing:border-box}
-  body{margin:0;font-family:Georgia,'Times New Roman',serif;background:var(--c);color:var(--n)}
-  header{background:var(--n);padding:18px 24px;color:#fff}
+  html,body{height:100%}
+  body{margin:0;font-family:Georgia,'Times New Roman',serif;background:var(--c);color:var(--n);
+       height:100vh;display:flex;flex-direction:column;overflow:hidden}
+  header{background:var(--n);padding:16px 24px;color:#fff;flex-shrink:0}
   header .k{font-size:11px;color:var(--t);letter-spacing:2px}
-  header .h{font-size:24px;margin-top:4px}
-  .wrap{max-width:1120px;margin:0 auto;padding:20px}
-  .top{display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap}
-  .top a,.top button{font-family:inherit;font-size:13px;color:var(--t);background:transparent;border:1px solid var(--b);border-radius:8px;padding:8px 12px;text-decoration:none;cursor:pointer}
-  .tabs{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px}
-  .tab{background:#fff;border:1px solid var(--b);border-radius:8px;padding:8px 12px;font-family:inherit;cursor:pointer;color:var(--n)}
-  .tab.on{border-color:var(--t);color:var(--t)}
-  .grid{display:grid;grid-template-columns:2fr 1fr;gap:16px}
-  .card{background:#fff;border:1px solid var(--b);border-radius:8px;padding:16px}
-  h2{font-size:16px;margin:0 0 12px}
+  header .h{font-size:22px;margin-top:4px;font-weight:bold}
+  .wrap{flex:1;max-width:1180px;width:100%;margin:0 auto;padding:18px 22px;display:flex;
+        flex-direction:column;min-height:0}
+  .top{display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;flex-shrink:0}
+  .top a,.top button{font-family:inherit;font-size:13px;color:var(--t);background:rgba(196,97,74,.08);
+       border:1px solid var(--b);border-radius:8px;padding:8px 14px;text-decoration:none;cursor:pointer;transition:.15s}
+  .top a:hover,.top button:hover{border-color:var(--t);background:rgba(196,97,74,.16)}
+  .tabs{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px;flex-shrink:0}
+  .tab{background:var(--w);border:1px solid var(--b);border-radius:20px;padding:8px 16px;font-family:inherit;
+       font-size:13px;cursor:pointer;color:var(--n);transition:.15s}
+  .tab:hover{border-color:var(--t);color:var(--t)}
+  .tab.on{border-color:var(--t);color:#fff;background:var(--t)}
+  .grid{display:grid;grid-template-columns:1.8fr 1fr;gap:16px;flex:1;min-height:0}
+  .col{display:flex;flex-direction:column;gap:16px;min-height:0}
+  .card{background:var(--w);border:1px solid var(--b);border-radius:14px;padding:18px 20px;
+        display:flex;flex-direction:column;min-height:0}
+  .card.scroll{overflow:hidden}
+  .card .body{overflow-y:auto;min-height:0}
+  h2{font-size:16px;margin:0 0 12px;flex-shrink:0}
   table{width:100%;border-collapse:collapse;font-size:13px}
-  th{text-align:left;color:var(--u);font-weight:normal;border-bottom:1px solid var(--b);padding:7px}
-  td{border-bottom:1px solid var(--m);padding:8px;vertical-align:top}
-  .pill{display:inline-block;border-radius:6px;padding:2px 7px;background:var(--m);font-size:11px;color:var(--u)}
-  .pending{color:#8B6B10}.running{color:#2B5278}.failed{color:var(--r)}.done{color:var(--g)}.cancelled{color:#777}.awaiting_approval{color:#8B4513}
+  thead th{position:sticky;top:0;background:var(--w);z-index:1}
+  th{text-align:left;color:var(--u);font-weight:normal;border-bottom:1px solid var(--b);padding:8px 7px}
+  td{border-bottom:1px solid var(--m);padding:9px 7px;vertical-align:top}
+  .pill{display:inline-block;border-radius:8px;padding:2px 8px;background:var(--m);font-size:11px;color:var(--u)}
+  .st{display:inline-block;border-radius:8px;padding:2px 9px;font-size:12px}
+  .pending{color:#8B6B10;background:rgba(139,107,16,.10)}
+  .running{color:#2B5278;background:rgba(43,82,120,.10)}
+  .failed{color:var(--r);background:rgba(168,65,44,.10)}
+  .done{color:var(--g);background:rgba(74,122,94,.10)}
+  .cancelled{color:#777;background:rgba(119,119,119,.10)}
+  .awaiting_approval{color:#8B4513;background:rgba(139,69,19,.10)}
   .actions{display:flex;gap:6px;flex-wrap:wrap}
-  .actions button{border:1px solid var(--b);background:#fff;border-radius:7px;padding:5px 8px;font-size:12px;font-family:inherit;cursor:pointer}
+  .actions button{border:1px solid var(--b);background:var(--w);border-radius:8px;padding:5px 10px;
+       font-size:12px;font-family:inherit;cursor:pointer;color:var(--n);transition:.15s}
   .actions button:hover{border-color:var(--t);color:var(--t)}
   .muted{color:var(--u);font-size:12px}
-  .event{border-bottom:1px solid var(--m);padding:8px 0;font-size:13px}
+  .event{border-bottom:1px solid var(--m);padding:9px 0;font-size:13px;word-break:break-word}
   .event:last-child{border:0}
-  .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--g);color:#fff;border-radius:8px;padding:10px 16px;display:none}
-  @media(max-width:760px){.grid{grid-template-columns:1fr} th:nth-child(4),td:nth-child(4){display:none}}
+  .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--g);color:#fff;
+       border-radius:8px;padding:10px 16px;display:none;z-index:50}
+  /* Скроллбары в тон теме */
+  .card .body::-webkit-scrollbar{width:10px}
+  .card .body::-webkit-scrollbar-thumb{background:var(--b);border-radius:6px}
+  .card .body::-webkit-scrollbar-track{background:transparent}
+  @media(max-width:760px){.grid{grid-template-columns:1fr;overflow-y:auto} th:nth-child(4),td:nth-child(4){display:none}}
 </style></head><body>
-<header><div class="k">MILA OFFICE · OPERATOR</div><div class="h">Queue Control</div></header>
+<header><div class="k">MILA OFFICE · ОПЕРАТОР</div><div class="h">Управление очередью</div></header>
 <div class="wrap">
-  <div class="top"><a href="/">Agents</a><a href="/dashboard">Dashboard</a><a href="/settings">Settings</a><button onclick="load()">Refresh</button></div>
+  <div class="top"><a href="/">Агенты</a><a href="/dashboard">Дашборд</a><a href="/settings">Настройки</a><button onclick="load()">Обновить</button></div>
   <div class="tabs" id="tabs"></div>
   <div class="grid">
-    <div class="card"><h2>Tasks</h2><div id="tasks"></div></div>
-    <div>
-      <div class="card"><h2>Pending Approvals</h2><div id="approvals"></div></div>
-      <div class="card"><h2>Recent Events</h2><div id="events"></div></div>
+    <div class="card scroll"><h2>Задачи</h2><div class="body" id="tasks"></div></div>
+    <div class="col">
+      <div class="card" style="flex:0 0 auto"><h2>Supervisor</h2><div id="supervisor" class="muted"></div></div>
+      <div class="card scroll" style="flex:0 1 auto;max-height:38%"><h2>Ждут одобрения</h2><div class="body" id="approvals"></div></div>
+      <div class="card scroll" style="flex:1 1 auto"><h2>Последние события</h2><div class="body" id="events"></div></div>
     </div>
   </div>
 </div>
 <div class="toast" id="toast"></div>
 <script>
 let CSRF='', FILTER='';
-const statuses=['','pending','running','awaiting_approval','failed','done','cancelled'];
+// status-фильтры: значение для API → русская подпись
+const STATUSES=[['','все'],['pending','в очереди'],['running','выполняется'],
+  ['awaiting_approval','ждут одобрения'],['failed','ошибка'],['done','готово'],['cancelled','отменено']];
+const ST_RU={pending:'в очереди',running:'выполняется',awaiting_approval:'ждёт одобрения',
+  failed:'ошибка',done:'готово',cancelled:'отменено'};
+const ACT_RU={retry:'повторить',unblock:'разблокировать',cancel:'отменить'};
 function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 function toast(s){const t=document.getElementById('toast');t.textContent=s;t.style.display='block';setTimeout(()=>t.style.display='none',2200);}
-function tabName(s){return s||'all';}
 function renderTabs(){
-  document.getElementById('tabs').innerHTML=statuses.map(s=>'<button class="tab '+(s===FILTER?'on':'')+'" onclick="FILTER=\''+s+'\';load()">'+tabName(s)+'</button>').join('');
+  document.getElementById('tabs').innerHTML=STATUSES.map(([v,ru])=>
+    '<button class="tab '+(v===FILTER?'on':'')+'" onclick="FILTER=\''+v+'\';load()">'+ru+'</button>').join('');
 }
 async function act(id, action){
   const body=action==='retry'?{reset_attempts:false}:action==='cancel'?{reason:'operator'}:{};
   const r=await fetch('/api/operator/task/'+encodeURIComponent(id)+'/'+action,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':CSRF},body:JSON.stringify(body)});
   const d=await r.json();
-  toast(d.ok ? action+' '+id : (d.error||'error'));
+  toast(d.ok ? (ACT_RU[action]||action)+': '+id : (d.error||'ошибка'));
   load();
 }
 function actions(t){
   if(t.status==='running') return '';
-  return '<div class="actions"><button onclick="act(\''+esc(t.id)+'\',\'retry\')">retry</button><button onclick="act(\''+esc(t.id)+'\',\'unblock\')">unblock</button><button onclick="act(\''+esc(t.id)+'\',\'cancel\')">cancel</button></div>';
+  return '<div class="actions"><button onclick="act(\''+esc(t.id)+'\',\'retry\')">повторить</button>'+
+    '<button onclick="act(\''+esc(t.id)+'\',\'unblock\')">разблок.</button>'+
+    '<button onclick="act(\''+esc(t.id)+'\',\'cancel\')">отменить</button></div>';
 }
 async function load(){
   renderTabs();
   const url='/api/operator'+(FILTER?'?status='+encodeURIComponent(FILTER):'');
   const d=await (await fetch(url)).json();
   CSRF=d.csrf;
+  const sv=d.supervisor||{};
+  const svc=sv.services||{};
+  document.getElementById('supervisor').innerHTML=
+    '<span class="st '+(sv.status==='ok'?'done':'failed')+'">'+esc(sv.status||'missing')+'</span>'+
+    '<div class="muted">webapp: '+esc((svc.webapp&&svc.webapp.up)?'up':'down')+
+    ' · bridge: '+esc((svc.bridge&&svc.bridge.up)?'up':'down')+
+    ' · n8n: '+esc((svc.n8n&&svc.n8n.up)?'up':'down')+'</div>'+
+    '<div class="muted">worker: '+esc((sv.last_worker&&sv.last_worker.ok)?'ok':((sv.last_worker&&sv.last_worker.error)||'—'))+'</div>';
   const tasks=d.tasks||[];
-  document.getElementById('tasks').innerHTML=tasks.length?'<table><thead><tr><th>ID</th><th>Pipeline</th><th>Status</th><th>Dedupe</th><th>Next</th><th></th></tr></thead><tbody>'+tasks.map(t=>
-    '<tr><td>'+esc(t.id)+'<div class="muted">try '+esc(t.attempts||0)+'</div></td><td>'+esc(t.pipeline)+'</td><td><span class="'+esc(t.status)+'">'+esc(t.status)+'</span></td><td><span class="pill">'+esc(t.dedupe_key||'—')+'</span></td><td>'+esc(t.next_run_at||'')+'</td><td>'+actions(t)+'</td></tr>'
-  ).join('')+'</tbody></table>':'<div class="muted">No tasks</div>';
+  document.getElementById('tasks').innerHTML=tasks.length?'<table><thead><tr><th>ID</th><th>Пайплайн</th><th>Статус</th><th>Дедуп</th><th>Запуск</th><th></th></tr></thead><tbody>'+tasks.map(t=>
+    '<tr><td>'+esc(t.id)+'<div class="muted">попытка '+esc(t.attempts||0)+'</div></td><td>'+esc(t.pipeline)+'</td><td><span class="st '+esc(t.status)+'">'+esc(ST_RU[t.status]||t.status)+'</span></td><td><span class="pill">'+esc(t.dedupe_key||'—')+'</span></td><td>'+esc(t.next_run_at||'')+'</td><td>'+actions(t)+'</td></tr>'
+  ).join('')+'</tbody></table>':'<div class="muted">Задач нет</div>';
   const approvals=d.pending_approvals||{};
   const ak=Object.keys(approvals);
-  document.getElementById('approvals').innerHTML=ak.length?ak.map(k=>'<div class="event"><b>'+esc(k)+'</b><div class="muted">'+esc(approvals[k].status)+' · '+esc(approvals[k].comment||'')+'</div></div>').join(''):'<div class="muted">No pending approvals</div>';
+  document.getElementById('approvals').innerHTML=ak.length?ak.map(k=>'<div class="event"><b>'+esc(k)+'</b><div class="muted">'+esc(ST_RU[approvals[k].status]||approvals[k].status)+(approvals[k].comment?' · '+esc(approvals[k].comment):'')+'</div></div>').join(''):'<div class="muted">Нет задач на одобрении</div>';
   const ev=d.events||[];
-  document.getElementById('events').innerHTML=ev.length?ev.map(e=>'<div class="event">'+esc(e.kind)+'<div class="muted">'+esc(e.ts)+' · '+esc(JSON.stringify(e.payload||{}))+'</div></div>').join(''):'<div class="muted">No events</div>';
+  document.getElementById('events').innerHTML=ev.length?ev.map(e=>'<div class="event">'+esc(e.kind)+'<div class="muted">'+esc(e.ts)+' · '+esc(JSON.stringify(e.payload||{}))+'</div></div>').join(''):'<div class="muted">Событий нет</div>';
 }
 load();
 </script></body></html>"""

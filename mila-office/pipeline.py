@@ -542,9 +542,87 @@ def _notify_telegram(chain: str, summary: str, reason: str = ""):
         })
 
 
+def _artifact_from_result(pipeline: str, status: str, result: dict | None) -> dict:
+    result = result or {}
+    steps = result.get("steps") or []
+    files = []
+    urls = []
+
+    for key in ("pdf_path", "draft_path", "local_path"):
+        if result.get(key):
+            files.append(str(result[key]))
+    gamma = result.get("gamma") or {}
+    if isinstance(gamma, dict):
+        for key in ("local_path",):
+            if gamma.get(key):
+                files.append(str(gamma[key]))
+        for key in ("gamma_url", "pdf_url", "export_url"):
+            if gamma.get(key):
+                urls.append(str(gamma[key]))
+
+    summary = result.get("message") or ""
+    if not summary and steps:
+        tail = steps[-1] or {}
+        summary = f"{tail.get('agent', pipeline)}: {(tail.get('reply') or '')[:220]}"
+    if not summary:
+        summary = f"{pipeline}: {status}"
+
+    next_actions = []
+    if status == "awaiting_approval":
+        next_actions.append("Review and approve in dashboard/operator before continuing.")
+    if status == "failed":
+        next_actions.append("Check task result and retry from /operator when ready.")
+
+    return {
+        "summary": summary[:600],
+        "files": sorted(set(files)),
+        "urls": sorted(set(urls)),
+        "next_actions": next_actions,
+    }
+
+
+def _notify_task_status(pipeline: str, status: str, artifact: dict,
+                        task_id: str = "", reason: str = ""):
+    policy = policies.get_policy(pipeline)
+    if status not in set(policy.get("notify_on_status") or []):
+        return
+    summary = artifact.get("summary") or f"{pipeline}: {status}"
+    extra = ""
+    if artifact.get("files"):
+        extra += "\nFiles: " + ", ".join(artifact["files"][:3])
+    if artifact.get("urls"):
+        extra += "\nURLs: " + ", ".join(artifact["urls"][:3])
+    task_part = f"task {task_id}: " if task_id else ""
+    _notify_telegram(
+        pipeline,
+        f"{task_part}{status}\n{summary}{extra}",
+        reason=reason or f"policy notify_on_status:{status}",
+    )
+
+
+def _notify_recovered_tasks(tasks: list):
+    for task in tasks:
+        artifact = {
+            "summary": (
+                f"Recovered stale task {task.get('id')} "
+                f"({task.get('pipeline')}) to {task.get('status')}."
+            ),
+            "files": [],
+            "urls": [],
+            "next_actions": ["Worker will pick it up again if it is pending."],
+        }
+        _notify_telegram(
+            task.get("pipeline") or "operator",
+            artifact["summary"],
+            reason="task:recovered",
+        )
+
+
 def run_worker(notify: bool = False) -> dict:
     """Run exactly one queued task by priority."""
-    memory.recover_stale_tasks()
+    recovered = memory.recover_stale_tasks()
+    if recovered:
+        _notify_recovered_tasks(recovered)
     worker_id = memory.default_worker_id()
     task = memory.dequeue_task("pipeline", worker_id=worker_id)
     if not task:
@@ -570,21 +648,30 @@ def run_worker(notify: bool = False) -> dict:
         else:
             result = run_chain(pipeline, notify=notify or bool(data.get("notify")))
         status = policies.status_from_result(result)
-        task_result = {"pipeline": pipeline, "result_status": status, "raw_status": result.get("status")}
+        artifact = _artifact_from_result(pipeline, status, result)
+        task_result = {
+            "pipeline": pipeline,
+            "result_status": status,
+            "raw_status": result.get("status"),
+            "artifact": artifact,
+        }
         if policies.should_retry(pipeline, status, attempts):
             delay = policies.retry_delay_seconds(pipeline, attempts, status, result)
             memory.reschedule_task(task["id"], delay, reason=status, result=task_result)
             return {"ok": True, "status": "retry_scheduled", "task_id": task["id"],
                     "pipeline": pipeline, "retry_after": delay, "result": result}
         memory.complete_task(task["id"], status, task_result)
+        _notify_task_status(pipeline, status, artifact, task_id=task["id"])
         return result
     except Exception as e:
-        task_result = {"pipeline": pipeline, "error": str(e)[:500]}
+        artifact = _artifact_from_result(pipeline, "failed", {"message": str(e)[:500]})
+        task_result = {"pipeline": pipeline, "error": str(e)[:500], "artifact": artifact}
         if policies.should_retry(pipeline, "failed", attempts):
             delay = policies.retry_delay_seconds(pipeline, attempts, "failed", task_result)
             memory.reschedule_task(task["id"], delay, reason="failed", result=task_result)
         else:
             memory.complete_task(task["id"], "failed", task_result)
+            _notify_task_status(pipeline, "failed", artifact, task_id=task["id"])
         raise
     finally:
         stop_heartbeat.set()

@@ -36,6 +36,7 @@ HANDOFFS = MEM_DIR / "handoffs.json"
 TASK_QUEUE = MEM_DIR / "task_queue.json"
 APPROVALS = MEM_DIR / "approvals.json"
 RATE_LIMITS = MEM_DIR / "rate_limits.json"
+SUPERVISOR_STATUS = MEM_DIR / "supervisor_status.json"
 _LOCK = MEM_DIR / ".lock"
 ACTIVE_TASK_STATUSES = {"pending", "running"}
 
@@ -358,13 +359,15 @@ def dequeue_task(agent: str = "pipeline", worker_id: str | None = None,
 
 
 def complete_task(task_id: str, status: str = "done", result: dict | None = None) -> dict:
+    result = result or {}
     with _FileLock():
         rows = _read_json(TASK_QUEUE, [])
         for r in rows:
             if r.get("id") == task_id:
                 r["status"] = status
                 r["finished_at"] = _now()
-                r["result"] = result or {}
+                r["result"] = result
+                r["artifact"] = result.get("artifact") or r.get("artifact") or {}
                 r["lease_expires_at"] = None
                 r["lease_expires_ts"] = None
                 _write_json(TASK_QUEUE, rows)
@@ -539,6 +542,17 @@ def list_tasks(status: str | None = None) -> list:
     return [r for r in rows if status is None or r.get("status") == status]
 
 
+def write_supervisor_status(status: dict) -> dict:
+    rec = {"ok": True, "ts": _now(), **(status or {})}
+    with _FileLock():
+        _write_json(SUPERVISOR_STATUS, rec)
+    return rec
+
+
+def read_supervisor_status() -> dict:
+    return _read_json(SUPERVISOR_STATUS, {"ok": False, "status": "missing"})
+
+
 def set_approval(item_id: str, agent: str, status: str, comment: str = "") -> dict:
     """Set structured approval for an item."""
     item_id = (item_id or "").strip()
@@ -659,6 +673,7 @@ def office_status(limit: int = 20) -> dict:
         "handoffs_open": list_handoffs(status="pending")[-limit:],
         "approvals": latest_approvals,
         "rate_limits": rate_limit_status(),
+        "supervisor": read_supervisor_status(),
         "recent_events": recent_events(limit),
         "recent_operator_events": [
             e for e in recent_events(limit * 2)

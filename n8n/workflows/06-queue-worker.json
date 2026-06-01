@@ -1,0 +1,37 @@
+{
+  "name": "MILA — Queue worker (drain)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{"field": "minutes", "minutesInterval": 2}]
+        }
+      },
+      "id": "f1b2c3d4-0006-4000-8000-000000000001",
+      "name": "Every 2 minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:5051/v1/tasks/worker",
+        "options": {"timeout": 3600000}
+      },
+      "id": "f1b2c3d4-0006-4000-8000-000000000002",
+      "name": "Drain one task",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [480, 300]
+    }
+  ],
+  "connections": {
+    "Every 2 minutes": {
+      "main": [[{"node": "Drain one task", "type": "main", "index": 0}]]
+    }
+  },
+  "active": false,
+  "settings": {"executionOrder": "v1"},
+  "meta": {"templateCredsSetupCompleted": true}
+}
