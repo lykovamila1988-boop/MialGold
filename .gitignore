@@ -1,10 +1,12 @@
 # ── Secrets & credentials ─────────────────────────────────────
 .env
 .env.*
-!.env.example
+# .env.example НЕ исключаем: он содержал реальный META_APP_SECRET — игнорируем целиком.
+.env.example
 !env.template
 
 tools/.env
+tools/.env.example
 tools/Passwords
 tools/*password*
 tools/manychat_webhook_backup.txt
