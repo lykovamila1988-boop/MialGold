@@ -434,11 +434,25 @@ def _update_env(updates):
     env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def _oauth_done(title, msg):
+def _oauth_done(title, msg, show_test=False):
+    test_html = ""
+    if show_test:
+        # Кнопка живой проверки + «что дальше» — чтобы после OAuth не было вопроса «и что теперь?».
+        test_html = (
+            "<p><button onclick='testIg()' style=\"font-family:inherit;background:#C4614A;color:#fff;"
+            "border:0;border-radius:8px;padding:9px 16px;font-size:14px;cursor:pointer\">"
+            "Проверить Instagram API</button> <span id='tr' style='color:#7A5E54;font-size:13px'></span></p>"
+            "<p style='color:#7A5E54;font-size:13px'>Дальше: перезапусти приложение, чтобы агенты "
+            "подхватили новый токен и доступ к комментариям.</p>"
+            "<script>async function testIg(){var s=document.getElementById('tr');s.textContent='Проверяю…';"
+            "try{var d=await (await fetch('/api/test/instagram')).json();"
+            "s.innerHTML=d.ok?('\\u2713 @'+(d.username||'?')+' (id '+(d.user_id||'?')+')'):('\\u26A0\\uFE0F '+(d.error||'ошибка'));}"
+            "catch(e){s.textContent='\\u26A0\\uFE0F сеть';}}</script>"
+        )
     return Response(
         f"<!doctype html><meta charset=utf-8><body style='font-family:Georgia,serif;"
         f"max-width:560px;margin:60px auto;color:#1E140F'>"
-        f"<h2 style='color:#C4614A'>{title}</h2><p>{msg}</p>"
+        f"<h2 style='color:#C4614A'>{title}</h2><p>{msg}</p>{test_html}"
         f"<p><a href='/settings'>← Настройки</a></p></body>", mimetype="text/html")
 
 
@@ -492,6 +506,52 @@ def api_health():
         (health["gemini"]["configured"] or health["claude"]["configured"])
         and health["telegram"]["configured"]
     )
+
+    # Очередь: что требует руки человека (для статус-бара Healthy/Degraded/Action).
+    try:
+        st = memory.office_status(limit=1)
+        counts = (st.get("tasks") or {}).get("counts") or {}
+        approvals = st.get("approvals") or {}
+    except Exception:
+        counts, approvals = {}, {}
+    approvals_waiting = sum(
+        1 for v in approvals.values()
+        if isinstance(v, dict) and v.get("status") in {"pending", "changes_requested"}
+    )
+    attention = {
+        "failed": int(counts.get("failed", 0) or 0),
+        "awaiting_approval": int(counts.get("awaiting_approval", 0) or 0) + approvals_waiting,
+        "running": int(counts.get("running", 0) or 0),
+        "pending": int(counts.get("pending", 0) or 0),
+    }
+    health["attention"] = attention
+
+    # Уровень: action_needed (критично/ждёт человека) > degraded (автоматика хромает) > healthy.
+    core_ok = health["gemini"]["configured"] or health["claude"]["configured"]
+    critical, degraded = [], []
+    if not core_ok:
+        critical.append("нет LLM (Gemini/Claude)")
+    if attention["failed"]:
+        critical.append(f"{attention['failed']} задач с ошибкой")
+    if attention["awaiting_approval"]:
+        critical.append(f"{attention['awaiting_approval']} ждут одобрения")
+    if not health["telegram"]["configured"]:
+        degraded.append("Telegram не настроен")
+    if not health["instagram"]["configured"]:
+        degraded.append("Instagram не подключён")
+    if not health["supabase"]["configured"]:
+        degraded.append("Supabase не настроен")
+    if not health["bridge"].get("up"):
+        degraded.append("n8n-мост недоступен")
+    if not health["n8n"].get("up"):
+        degraded.append("n8n недоступен")
+
+    if critical:
+        health["level"], health["reasons"] = "action_needed", critical
+    elif degraded:
+        health["level"], health["reasons"] = "degraded", degraded
+    else:
+        health["level"], health["reasons"] = "healthy", []
     return jsonify(health)
 
 
@@ -536,12 +596,86 @@ def ig_callback():
         _update_env({"IG_API_FLOW": "instagram_login",
                      "IG_ACCESS_TOKEN": long_token, "IG_USER_ID": user_id})
         logger.info("Instagram OAuth: токен сохранён (user_id=%s)", user_id)
-        return _oauth_done("Instagram подключён ✓",
-                           "Долгоживущий токен сохранён в tools/.env. Перезапусти приложение, "
-                           "чтобы агенты подхватили новый токен и scope комментариев.")
+        return _oauth_done(
+            "Instagram подключён ✓",
+            f"Аккаунт ID: <code>{user_id or '—'}</code><br>"
+            "Долгоживущий токен (~60 дней) сохранён в tools/.env.",
+            show_test=True)
     except Exception:
         logger.exception("Instagram OAuth token exchange failed")
         return "Обмен кода на токен не удался — подробности в logs/webapp.log.", 500
+
+
+def _current_ig_token() -> str:
+    """Свежий IG-токен из tools/.env (после OAuth/ручного сохранения) — base.* мог
+    загрузиться со старым значением до перезапуска. Fallback — то, что в base."""
+    for envf in (base.MILA_FOLDER / "tools" / ".env", base.MILA_FOLDER / ".env"):
+        try:
+            for line in envf.read_text(encoding="utf-8").splitlines():
+                s = line.strip()
+                for key in ("IG_ACCESS_TOKEN=", "INSTAGRAM_ACCESS_TOKEN="):
+                    if s.startswith(key):
+                        return s.split("=", 1)[1].strip().strip('"').strip("'")
+        except OSError:
+            pass
+    return getattr(base, "INSTAGRAM_TOKEN", "") or ""
+
+
+@app.get("/api/test/<service>")
+def api_test(service):
+    """Живая проверка одного подключения по кнопке «Проверить». Read-only (GET):
+    ничего не меняет, только дёргает соответствующий API и возвращает {ok, detail}."""
+    service = (service or "").lower()
+    try:
+        if service == "instagram":
+            token = _current_ig_token()
+            if not token:
+                return jsonify({"ok": False, "error": "Токен Instagram не задан"}), 400
+            r = requests.get("https://graph.instagram.com/v21.0/me",
+                             params={"fields": "user_id,username", "access_token": token}, timeout=10)
+            info = r.json()
+            if "error" in info:
+                return jsonify({"ok": False, "error": info["error"].get("message", "невалидный токен")}), 400
+            return jsonify({"ok": True, "username": info.get("username"),
+                            "user_id": str(info.get("user_id") or info.get("id") or ""),
+                            "detail": "@" + (info.get("username") or "?")})
+        if service == "telegram":
+            token = (getattr(base, "TELEGRAM_TOKEN", "") or "").strip()
+            if not token:
+                return jsonify({"ok": False, "error": "TELEGRAM_BOT_TOKEN не задан"}), 400
+            r = requests.get(f"https://api.telegram.org/bot{token}/getMe", timeout=10)
+            j = r.json()
+            if not j.get("ok"):
+                return jsonify({"ok": False, "error": j.get("description", "невалидный токен")}), 400
+            return jsonify({"ok": True, "detail": "@" + (j.get("result", {}).get("username") or "?")})
+        if service in ("bridge", "n8n"):
+            if service == "bridge":
+                url = f"http://127.0.0.1:{os.getenv('N8N_BRIDGE_PORT', '5051')}/health"
+            else:
+                url = os.getenv("N8N_BASE_URL", "http://127.0.0.1:5678").rstrip("/") + "/healthz"
+            p = _probe(url)
+            return jsonify({"ok": bool(p.get("up")), "detail": f"HTTP {p.get('status', p.get('error', '?'))}"})
+        if service == "supabase":
+            try:
+                import sys as _sys
+                tdir = str(base.MILA_FOLDER / "tools")
+                if tdir not in _sys.path:
+                    _sys.path.insert(0, tdir)
+                import supa
+                if not supa.available():
+                    return jsonify({"ok": False, "error": "Supabase не настроен (нет URL/ключа)"}), 400
+                supa.select("purchases", columns="id", limit=1)  # лёгкий ping
+                return jsonify({"ok": True, "detail": "запись" if supa.can_write() else "только чтение"})
+            except Exception as e:
+                return jsonify({"ok": False, "error": str(e)[:200]}), 400
+        if service in ("claude", "gemini"):
+            cfg = _integration_status().get(service, {})
+            return jsonify({"ok": bool(cfg.get("configured")),
+                            "detail": cfg.get("model") or ("настроен" if cfg.get("configured") else "не настроен")})
+    except Exception:
+        logger.exception("api_test failed for %s", service)
+        return jsonify({"ok": False, "error": "Ошибка проверки — см. логи"}), 500
+    return jsonify({"ok": False, "error": f"неизвестный сервис: {service}"}), 404
 
 
 @app.post("/api/settings/instagram-token")
@@ -1103,16 +1237,29 @@ SETTINGS_HTML = r"""<!DOCTYPE html>
   .btn{display:inline-block;margin-top:12px;background:#C4614A;color:#fff;border:none;border-radius:8px;
        padding:10px 18px;font-size:14px;font-family:inherit;cursor:pointer;text-decoration:none}
   .btn.dim{background:#B7A89F;cursor:default}
+  .btn.sec{background:#7A5E54;padding:7px 13px;font-size:13px}
+  .tres{font-size:13px;margin-left:6px}
   code{background:rgba(0,0,0,.06);padding:1px 5px;border-radius:4px;font-family:monospace;font-size:12px}
   a.back{color:#7A5E54;font-size:13px}
 </style></head><body><div class="wrap">
   <p><a class="back" href="/">← В чат</a></p>
   <h1>Настройки и подключения</h1>
-  <div class="sub">Статус интеграций. Секреты не отображаются.</div>
+  <div class="sub">Чек-лист подключений. Нажми «Проверить» — увидишь живой статус. Секреты не отображаются.</div>
   <div id="cards">Загрузка…</div>
 <script>
 let CSRF='';
+function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 function badge(ok){return '<span class="badge '+(ok?'ok':'no')+'">'+(ok?'подключено':'не настроено')+'</span>';}
+function testCell(svc){return ' <button class="btn sec" data-svc="'+svc+'" onclick="runTest(this)">Проверить</button><span class="tres" id="tr-'+svc+'"></span>';}
+async function runTest(btn){
+  var svc=btn.getAttribute('data-svc'), s=document.getElementById('tr-'+svc);
+  s.textContent='Проверяю…'; btn.disabled=true;
+  try{ var d=await (await fetch('/api/test/'+svc)).json();
+    s.innerHTML=d.ok?('<span style="color:#2C5F3A">✓ '+esc(d.detail||'ок')+'</span>')
+                    :('<span style="color:#A8412C">⚠️ '+esc(d.error||'ошибка')+'</span>');
+  }catch(e){ s.textContent='⚠️ сеть'; }
+  btn.disabled=false;
+}
 async function saveToken(){
   const tok=document.getElementById('igtok').value.trim();
   const msg=document.getElementById('igmsg');
@@ -1129,15 +1276,16 @@ async function saveToken(){
 async function load(){
   const s = await (await fetch('/api/settings')).json();
   CSRF=s.csrf;
+  let h={}; try{ h = await (await fetch('/api/health')).json(); }catch(e){}
   const el = document.getElementById('cards'); el.innerHTML='';
   // Claude
   el.innerHTML += '<div class="card"><h3>Claude (Anthropic)'+badge(s.claude.configured)+'</h3>'
-    + '<p class="meta">Режим: <code>'+s.claude.mode+'</code><br>'+s.claude.note+'</p></div>';
+    + '<p class="meta">Режим: <code>'+s.claude.mode+'</code><br>'+s.claude.note+'</p>'+testCell('claude')+'</div>';
   // Gemini
   el.innerHTML += '<div class="card"><h3>Gemini'+badge(s.gemini.configured)+'</h3>'
     + '<p class="meta">Provider: <code>'+s.gemini.provider+'</code> / model: <code>'+s.gemini.model+'</code><br>'
     + 'Heavy work: <code>'+(s.gemini.heavy_lifting?'Gemini':'Claude')+'</code> / Claude agents: <code>'
-    + (s.gemini.anthropic_agents||[]).join(', ')+'</code></p></div>';
+    + (s.gemini.anthropic_agents||[]).join(', ')+'</code></p>'+testCell('gemini')+'</div>';
   // Instagram + OAuth
   const ig = s.instagram;
   let igc = '<div class="card"><h3>Instagram'+badge(ig.configured)+'</h3>'
@@ -1155,10 +1303,19 @@ async function load(){
     + 'font-family:monospace;font-size:12px;margin-bottom:8px">'
     + '<button class="btn" onclick="saveToken()">Проверить и сохранить</button> '
     + '<span id="igmsg" class="meta"></span>';
-  igc += '</div>'; el.innerHTML += igc;
-  // Telegram / Gumroad
+  igc += '<div style="margin-top:12px">'+testCell('instagram')+'</div></div>'; el.innerHTML += igc;
+  // Telegram
   el.innerHTML += '<div class="card"><h3>Telegram'+badge(s.telegram.configured)+'</h3>'
-    + '<p class="meta">Токен бота в <code>TELEGRAM_BOT_TOKEN</code> / <code>TELEGRAM_API</code>. OAuth не применяется.</p></div>';
+    + '<p class="meta">Токен бота в <code>TELEGRAM_BOT_TOKEN</code> / <code>TELEGRAM_API</code>.</p>'+testCell('telegram')+'</div>';
+  // Supabase (статус из /api/health)
+  const sb=h.supabase||{};
+  el.innerHTML += '<div class="card"><h3>Supabase'+badge(sb.configured)+'</h3>'
+    + '<p class="meta">База продаж и продуктов. '+(sb.can_write?'Доступна запись.':'Только чтение или не настроено.')+'</p>'+testCell('supabase')+'</div>';
+  // n8n + мост
+  const br=h.bridge||{}, nn=h.n8n||{};
+  el.innerHTML += '<div class="card"><h3>n8n + мост'+badge(br.up)+'</h3>'
+    + '<p class="meta">Автоматизация: расписания и очередь задач. n8n: <code>'+(nn.up?'up':'down')+'</code> · мост: <code>'+(br.up?'up':'down')+'</code></p>'+testCell('bridge')+'</div>';
+  // Gumroad
   el.innerHTML += '<div class="card"><h3>Gumroad'+badge(s.gumroad.configured)+'</h3>'
     + '<p class="meta">Токен в <code>GUMROAD_ACCESS_TOKEN</code>. OAuth не применяется.</p></div>';
 }
@@ -1267,6 +1424,27 @@ let CSRF="";
 function esc(s){return (s||"").replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 function toast(m){const t=document.getElementById('toast');t.textContent=m;t.style.display='block';setTimeout(()=>t.style.display='none',3500);}
 function nf(n){return (n==null)?'—':String(n).replace(/\B(?=(\d{3})+(?!\d))/g,' ');}
+// «Утренний пульт» без техножаргона: человеческие имена задач, фаз и событий.
+const PNAME={content_week:'Контент на неделю',new_client:'Новая клиентка',monday_brief:'Утренний бриф',
+  weekly_report:'Недельный отчёт',competitive_analysis:'Анализ конкурентов',product_research:'Исследование продукта',
+  new_product:'Новый продукт'};
+const PHASE_RU={cold_start:'запуск',learning:'накопление данных',analysis:'анализ'};
+function phaseRu(p){return PHASE_RU[p]||p||'—';}
+function rel(ts){if(!ts)return '';var d=new Date(ts).getTime();if(isNaN(d))return esc(ts);var s=(Date.now()-d)/1000;
+  if(s<0)s=0;if(s<60)return 'только что';if(s<3600)return Math.floor(s/60)+' мин назад';
+  if(s<86400)return Math.floor(s/3600)+' ч назад';return Math.floor(s/86400)+' дн назад';}
+function evRu(k){
+  k=k||'';
+  if(k.indexOf('pipeline:done:')===0)return '✅ Готово: '+(PNAME[k.slice(14)]||k.slice(14));
+  if(k.indexOf('pipeline:start:')===0)return '▶ Запущено: '+(PNAME[k.slice(15)]||k.slice(15));
+  if(k.indexOf('pipeline:fail:')===0)return '⚠️ Сбой: '+(PNAME[k.slice(14)]||k.slice(14));
+  if(k.indexOf('context:')===0)return 'Событие из мира';
+  const M={'task:queued':'Поставлено в очередь','task:dequeued':'Взято в работу','task:complete':'Задача завершена',
+    'task:recovered':'Задача восстановлена','task:cancelled':'Задача отменена','published':'📸 Пост опубликован',
+    'measured':'📊 Замерены метрики поста','approval:set':'Решение по одобрению','profile:update':'Профиль обновлён',
+    'handoff':'Передача между агентами','queue:cleared':'Очередь очищена'};
+  return M[k]||k;
+}
 
 async function item(url){
   const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':CSRF},body:'{}'});
@@ -1288,7 +1466,7 @@ async function load(){
   let d; try{ d=await (await fetch('/api/dashboard')).json(); }catch(e){ return; }
   CSRF=d.csrf;
   const ph=d.profile||{}, k=d.kpi||{};
-  document.getElementById('sub').textContent='@liudmyla.lykova · фаза: '+(k.phase||ph.phase||'—');
+  document.getElementById('sub').textContent='@liudmyla.lykova · этап: '+phaseRu(k.phase||ph.phase);
 
   // KPI карточки
   document.getElementById('kpis').innerHTML=[
@@ -1296,7 +1474,7 @@ async function load(){
     {v:nf(k.avg_reach),l:'ср. охват'},
     {v:(k.er!=null?k.er+'%':'—'),l:'вовлечённость'},
     {v:nf(k.sales),l:'продажи'},
-    {v:(k.phase||'—'),l:'фаза',d:k.goal?('цель: '+esc(k.goal)):''},
+    {v:phaseRu(k.phase),l:'этап',d:k.goal?('цель: '+esc(k.goal)):''},
   ].map(x=>'<div class="kpi"><div class="v">'+x.v+'</div><div class="l">'+x.l+'</div>'+(x.d?'<div class="d">'+x.d+'</div>':'')+'</div>').join('');
 
   const np=d.pending_posts.length, na=d.open_actions.length, ni=d.improvements.length;
@@ -1331,7 +1509,7 @@ async function load(){
   // события
   document.getElementById('cEv').textContent=d.events.length||'';
   document.getElementById('events').innerHTML = d.events.length ? d.events.map(e=>
-    '<div class="row"><div class="txt">'+esc(e.kind)+'<div class="meta">'+esc(e.ts)+'</div></div></div>'
+    '<div class="row"><div class="txt">'+esc(evRu(e.kind))+'<div class="meta">'+esc(rel(e.ts))+'</div></div></div>'
   ).join('') : '<div class="empty">Событий нет</div>';
 }
 
@@ -1398,6 +1576,24 @@ OPERATOR_HTML = r"""<!DOCTYPE html>
   .card .body::-webkit-scrollbar-thumb{background:var(--b);border-radius:6px}
   .card .body::-webkit-scrollbar-track{background:transparent}
   @media(max-width:760px){.grid{grid-template-columns:1fr;overflow-y:auto} th:nth-child(4),td:nth-child(4){display:none}}
+  /* Карточки задач: человеческий вид + результат/артефакт + раскрытие деталей */
+  .tcard{border:1px solid var(--b);border-radius:12px;padding:12px 14px;margin-bottom:10px;background:var(--w)}
+  .tc-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .tc-name{font-weight:bold;font-size:14px}
+  .tc-time{color:var(--u);font-size:12px;margin-left:auto}
+  .tc-result{margin:10px 0 2px;padding:10px 12px;background:var(--c);border-radius:9px;font-size:13px;line-height:1.5}
+  .tc-sum{color:var(--n);white-space:pre-wrap;word-break:break-word}
+  .art-f{color:var(--u);font-size:12px;margin-top:6px;word-break:break-all}
+  .art-u{margin-top:6px}.art-u a{color:var(--t);font-size:12px;word-break:break-all;text-decoration:none}
+  .tc-next{margin-top:8px;color:#8B4513;font-size:12px}
+  .tc-det{margin-top:8px}
+  .tc-det summary{cursor:pointer;color:var(--u);font-size:12px;list-style:none}
+  .tc-det summary::-webkit-details-marker{display:none}
+  .tc-det summary:before{content:'\25B8 ';color:var(--t)}
+  .tc-det[open] summary:before{content:'\25BE '}
+  .tc-det .kv{font-size:12px;color:var(--u);margin-top:6px;line-height:1.8;word-break:break-word}
+  .tc-det .kv code{background:var(--m);padding:1px 5px;border-radius:4px;font-size:11px}
+  .tcard .actions{margin-top:10px}
 </style></head><body>
 <header><div class="k">MILA OFFICE · ОПЕРАТОР</div><div class="h">Управление очередью</div></header>
 <div class="wrap">
@@ -1440,6 +1636,41 @@ function actions(t){
     '<button onclick="act(\''+esc(t.id)+'\',\'unblock\')">разблок.</button>'+
     '<button onclick="act(\''+esc(t.id)+'\',\'cancel\')">отменить</button></div>';
 }
+// Человеческие имена пайплайнов — чтобы оператор видел «Контент на неделю», а не content_week.
+const PNAME={content_week:'Контент на неделю',new_client:'Новая клиентка',monday_brief:'Утренний бриф',
+  weekly_report:'Недельный отчёт',competitive_analysis:'Анализ конкурентов',product_research:'Исследование продукта',
+  new_product:'Новый продукт'};
+function pname(p){return PNAME[p]||p||'—';}
+function rel(ts){if(!ts)return '';var d=new Date(ts).getTime();if(isNaN(d))return '';var s=(Date.now()-d)/1000;
+  if(s<0)s=0;if(s<60)return 'только что';if(s<3600)return Math.floor(s/60)+' мин назад';
+  if(s<86400)return Math.floor(s/3600)+' ч назад';return Math.floor(s/86400)+' дн назад';}
+function artHtml(a){
+  if(!a)return '';
+  var h='<div class="tc-result">';
+  if(a.summary)h+='<div class="tc-sum">'+esc(a.summary)+'</div>';
+  (a.files||[]).forEach(function(f){h+='<div class="art-f">📄 '+esc(f)+'</div>';});
+  (a.urls||[]).forEach(function(u){h+='<div class="art-u"><a href="'+esc(u)+'" target="_blank" rel="noopener">🔗 '+esc(u)+'</a></div>';});
+  (a.next_actions||[]).forEach(function(n){h+='<div class="tc-next">Дальше: '+esc(n)+'</div>';});
+  return h+'</div>';
+}
+function details(t){
+  var b=['id <code>'+esc(t.id)+'</code>','попыток: '+esc(t.attempts||0)];
+  if(t.dedupe_key)b.push('dedupe <code>'+esc(t.dedupe_key)+'</code>');
+  if(t.worker_id)b.push('worker <code>'+esc(t.worker_id)+'</code>');
+  if(t.lease_expires_at)b.push('lease до '+esc(t.lease_expires_at));
+  if(t.next_run_at)b.push('след. запуск '+esc(t.next_run_at));
+  if(t.priority!=null)b.push('приоритет '+esc(t.priority));
+  return '<details class="tc-det"><summary>технические детали</summary><div class="kv">'+b.join(' · ')+'</div></details>';
+}
+function taskCard(t){
+  var a=(t.result&&t.result.artifact)||(t.last_result&&t.last_result.artifact)||null;
+  var when=t.finished_at||t.started_at||t.next_run_at||t.created_at;
+  return '<div class="tcard"><div class="tc-head">'
+    +'<span class="st '+esc(t.status)+'">'+esc(ST_RU[t.status]||t.status)+'</span>'
+    +'<span class="tc-name">'+esc(pname(t.pipeline))+'</span>'
+    +'<span class="tc-time">'+esc(rel(when))+'</span></div>'
+    +artHtml(a)+details(t)+actions(t)+'</div>';
+}
 async function load(){
   renderTabs();
   const url='/api/operator'+(FILTER?'?status='+encodeURIComponent(FILTER):'');
@@ -1454,9 +1685,7 @@ async function load(){
     ' · n8n: '+esc((svc.n8n&&svc.n8n.up)?'up':'down')+'</div>'+
     '<div class="muted">worker: '+esc((sv.last_worker&&sv.last_worker.ok)?'ok':((sv.last_worker&&sv.last_worker.error)||'—'))+'</div>';
   const tasks=d.tasks||[];
-  document.getElementById('tasks').innerHTML=tasks.length?'<table><thead><tr><th>ID</th><th>Пайплайн</th><th>Статус</th><th>Дедуп</th><th>Запуск</th><th></th></tr></thead><tbody>'+tasks.map(t=>
-    '<tr><td>'+esc(t.id)+'<div class="muted">попытка '+esc(t.attempts||0)+'</div></td><td>'+esc(t.pipeline)+'</td><td><span class="st '+esc(t.status)+'">'+esc(ST_RU[t.status]||t.status)+'</span></td><td><span class="pill">'+esc(t.dedupe_key||'—')+'</span></td><td>'+esc(t.next_run_at||'')+'</td><td>'+actions(t)+'</td></tr>'
-  ).join('')+'</tbody></table>':'<div class="muted">Задач нет</div>';
+  document.getElementById('tasks').innerHTML=tasks.length?tasks.map(taskCard).join(''):'<div class="muted">Задач нет</div>';
   const approvals=d.pending_approvals||{};
   const ak=Object.keys(approvals);
   document.getElementById('approvals').innerHTML=ak.length?ak.map(k=>'<div class="event"><b>'+esc(k)+'</b><div class="muted">'+esc(ST_RU[approvals[k].status]||approvals[k].status)+(approvals[k].comment?' · '+esc(approvals[k].comment):'')+'</div></div>').join(''):'<div class="muted">Нет задач на одобрении</div>';
@@ -1465,6 +1694,84 @@ async function load(){
 }
 load();
 </script></body></html>"""
+
+
+# ─── Общий статус-бар системы (Healthy / Degraded / Action needed) ──────────
+# Один компонент на все страницы. Данные берёт из /api/health (level + reasons +
+# attention). На странице чата (есть #side) рендерится компактной «пилюлей»
+# справа сверху, на остальных — полосой в самом верху (flex-/обычный поток).
+_STATUS_BAR = r"""
+<style>
+#mila-sb{font-family:Georgia,'Times New Roman',serif;font-size:13px;flex-shrink:0;display:flex;
+  align-items:center;gap:10px;padding:6px 16px;color:#fff;cursor:pointer;user-select:none;
+  border-bottom:1px solid rgba(0,0,0,.12)}
+#mila-sb.healthy{background:#4A7A5E}#mila-sb.degraded{background:#B7791F}
+#mila-sb.action_needed{background:#A8412C}#mila-sb.unknown{background:#7A5E54}
+#mila-sb .dot{width:9px;height:9px;border-radius:50%;background:rgba(255,255,255,.92);flex-shrink:0}
+#mila-sb .lbl{font-weight:bold;letter-spacing:.3px}
+#mila-sb .rsn{opacity:.92;font-size:12px}
+#mila-sb .sp{flex:1}#mila-sb .chev{opacity:.85;font-size:11px}
+#mila-sb.pill{position:fixed;top:10px;right:14px;z-index:60;border-radius:20px;padding:6px 13px;
+  border:0;box-shadow:0 2px 8px rgba(0,0,0,.18)}
+#mila-sb.pill .rsn,#mila-sb.pill .sp{display:none}
+#mila-sb-panel{position:fixed;z-index:61;background:#fff;color:#1E140F;border:1px solid #E0D0C8;
+  border-radius:12px;box-shadow:0 8px 28px rgba(0,0,0,.18);padding:12px 14px;font-size:13px;
+  min-width:250px;display:none}
+#mila-sb-panel.bar{left:16px;top:38px}#mila-sb-panel.pill{right:14px;top:46px}
+#mila-sb-panel h4{margin:0 0 8px;font-size:11px;color:#7A5E54;text-transform:uppercase;letter-spacing:.5px}
+#mila-sb-panel .svc{display:flex;justify-content:space-between;gap:14px;padding:4px 0;border-bottom:1px solid #F2EAE2}
+#mila-sb-panel .svc:last-child{border:0}
+#mila-sb-panel .up{color:#4A7A5E}#mila-sb-panel .down{color:#A8412C}
+#mila-sb-panel .lk{margin-top:10px;display:flex;gap:12px;flex-wrap:wrap}
+#mila-sb-panel .lk a{color:#C4614A;text-decoration:none;font-size:12px}
+</style>
+<script>
+(function(){
+  var LBL={healthy:'Система в норме',degraded:'Сниженный режим',action_needed:'Нужно вмешательство',unknown:'Статус неизвестен'};
+  function row(name,ok,extra){return '<div class="svc"><span>'+name+'</span><span class="'+(ok?'up':'down')+'">'+(ok?('✓ '+(extra||'ок')):('✕ '+(extra||'нет')))+'</span></div>';}
+  function panelHtml(h){
+    var a=h.attention||{}, g=h.gemini||{}, c=h.claude||{}, ig=h.instagram||{}, sb=h.supabase||{};
+    var llmOk=g.configured||c.configured, llmName=g.configured?'Gemini':(c.configured?'Claude':'нет');
+    return '<h4>Состояние системы</h4>'
+      +row('LLM',llmOk,llmName)
+      +row('Telegram',(h.telegram||{}).configured)
+      +row('Instagram',ig.configured,ig.flow)
+      +row('Supabase',sb.configured,sb.can_write?'запись':'')
+      +row('n8n',(h.n8n||{}).up)
+      +row('n8n-мост',(h.bridge||{}).up)
+      +'<div class="svc"><span>Очередь</span><span>'+(a.failed||0)+' ошибок · '+(a.awaiting_approval||0)+' на одобрении · '+(a.running||0)+' в работе</span></div>'
+      +'<div class="lk"><a href="/dashboard">Дашборд</a><a href="/operator">Очередь</a><a href="/settings">Настройки</a></div>';
+  }
+  var mode=document.getElementById('side')?'pill':'bar';
+  var bar=document.createElement('div');bar.id='mila-sb';bar.className=(mode==='pill'?'pill ':'')+'unknown';
+  bar.innerHTML='<span class="dot"></span><span class="lbl">…</span><span class="rsn"></span><span class="sp"></span><span class="chev">▾</span>';
+  var panel=document.createElement('div');panel.id='mila-sb-panel';panel.className=mode;
+  if(mode==='pill'){document.body.appendChild(bar);}else{document.body.insertBefore(bar,document.body.firstChild);}
+  document.body.appendChild(panel);
+  bar.addEventListener('click',function(e){e.stopPropagation();panel.style.display=panel.style.display==='block'?'none':'block';});
+  document.addEventListener('click',function(){panel.style.display='none';});
+  async function refresh(){
+    try{
+      var h=await (await fetch('/api/health')).json();
+      var lvl=h.level||'unknown';
+      bar.className=(mode==='pill'?'pill ':'')+lvl;
+      bar.querySelector('.lbl').textContent=LBL[lvl]||lvl;
+      bar.querySelector('.rsn').textContent=(h.reasons&&h.reasons.length)?('· '+h.reasons.join(' · ')):'';
+      panel.innerHTML=panelHtml(h);
+    }catch(e){
+      bar.className=(mode==='pill'?'pill ':'')+'unknown';
+      bar.querySelector('.lbl').textContent='Статус недоступен';
+    }
+  }
+  refresh();setInterval(refresh,30000);
+})();
+</script>
+"""
+
+INDEX_HTML = INDEX_HTML.replace("</body>", _STATUS_BAR + "</body>")
+DASHBOARD_HTML = DASHBOARD_HTML.replace("</body>", _STATUS_BAR + "</body>")
+OPERATOR_HTML = OPERATOR_HTML.replace("</body>", _STATUS_BAR + "</body>")
+SETTINGS_HTML = SETTINGS_HTML.replace("</body>", _STATUS_BAR + "</body>")
 
 
 def _open_browser():
