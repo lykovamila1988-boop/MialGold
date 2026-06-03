@@ -1188,6 +1188,48 @@ def api_reply_send_one():
         return jsonify({"ok": False, "error": err}), 400
 
 
+@app.post("/api/reply-send-all")
+def api_reply_send_all():
+    """Отправить все ответы из очереди подряд (оператор)."""
+    import sys as _sys
+    _tools_dir = str(base.MILA_FOLDER / "mila-office")
+    if _tools_dir not in _sys.path:
+        _sys.path.insert(0, _tools_dir)
+    try:
+        import reply_sender
+    except ImportError:
+        return jsonify({"ok": False, "error": "reply_sender модуль не найден"}), 500
+
+    sent, failed = 0, 0
+    while True:
+        rep = memory.dequeue_reply()
+        if not rep:
+            break
+        ok, err, resp_id = reply_sender.post_reply(rep["comment_id"], rep["message"])
+        if ok:
+            memory.mark_reply(rep["id"], "sent", response_id=resp_id)
+            sent += 1
+        else:
+            memory.mark_reply(rep["id"], "failed", error=err)
+            failed += 1
+        # Небольшая пауза между ответами чтобы не выглядеть спамом.
+        import time
+        time.sleep(2)
+    logger.info("Manual send-all: %d sent, %d failed", sent, failed)
+    return jsonify({"ok": True, "sent": sent, "failed": failed})
+
+
+@app.post("/api/reply-delete/<reply_id>")
+def api_reply_delete(reply_id: str):
+    """Удалить ответ из очереди (оператор)."""
+    # Просто помечаем как cancelled.
+    rec = memory.mark_reply(reply_id, "cancelled", error="Удалён оператором")
+    if rec.get("id"):
+        logger.info("Manual reply delete: %s", reply_id)
+        return jsonify({"ok": True})
+    return jsonify({"ok": False, "error": "Ответ не найден"}), 400
+
+
 @app.get("/favicon.ico")
 def favicon():
     # Браузер всегда просит /favicon.ico — без маршрута это 404 в консоли.
@@ -2043,7 +2085,27 @@ async function sendReplyOne(){
     const d=await r.json();
     toast(d.ok?('Отправлен: '+d.detail):('Ошибка: '+(d.error||'?')));
   }catch(e){ toast('Сеть: '+e); }
-  btn.disabled=false; btn.textContent='Отправить следующий';
+  btn.disabled=false; btn.textContent='Отправить 1';
+  load();
+}
+async function sendReplyAll(){
+  const btn=event.target;
+  btn.disabled=true; btn.textContent='Отправляю все…';
+  try{
+    const r=await fetch('/api/reply-send-all',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':CSRF}});
+    const d=await r.json();
+    toast(d.ok?(d.sent+' отправлено, '+d.failed+' ошибок'):('Ошибка: '+(d.error||'?')));
+  }catch(e){ toast('Сеть: '+e); }
+  btn.disabled=false; btn.textContent='Отправить все';
+  load();
+}
+async function delReply(id){
+  if(!confirm('Удалить ответ из очереди?')) return;
+  try{
+    const r=await fetch('/api/reply-delete/'+encodeURIComponent(id),{method:'POST',headers:{'X-CSRF-Token':CSRF}});
+    const d=await r.json();
+    toast(d.ok?'Удалено':'Ошибка: '+(d.error||'?'));
+  }catch(e){ toast('Сеть: '+e); }
   load();
 }
 // Человеческие имена пайплайнов — чтобы оператор видел «Контент на неделю», а не content_week.
@@ -2104,8 +2166,8 @@ async function load(){
   const rqTot=(rq.pending||0)+(rq.sent||0)+(rq.failed||0);
   let rqHtml='<div class="muted">в очереди: '+esc(rq.pending||0)+' · отправлено: '+esc(rq.sent||0)+' · ошибок: '+esc(rq.failed||0)+'</div>';
   const items=(rq.items_pending||[]).slice(0,5);
-  if(items.length){rqHtml+='<div style="margin-top:8px;font-size:12px">'+items.map(item=>'<div style="border-bottom:1px solid #E0D0C8;padding:6px 0"><span style="color:var(--u)">@'+esc(item.username||'?')+'</span><br><span style="color:#666;font-size:11px">'+esc((item.comment_text||'').slice(0,60)+(item.comment_text&&item.comment_text.length>60?'...':''))+'</span></div>').join('')+'</div>';
-    if(rq.pending>0){rqHtml+='<div style="margin-top:10px"><button class="actions" style="display:inline-block;border:1px solid var(--b);background:var(--w);border-radius:8px;padding:5px 10px;font-size:12px;font-family:inherit;cursor:pointer;color:var(--n);transition:.15s" onclick="sendReplyOne()" title="Отправить один ответ из очереди вручную">Отправить следующий</button></div>';}
+  if(items.length){rqHtml+='<div style="margin-top:8px;font-size:12px">'+items.map(item=>'<div style="border-bottom:1px solid #E0D0C8;padding:6px 0;display:flex;justify-content:space-between;align-items:center;gap:8px"><div><span style="color:var(--u)">@'+esc(item.username||'?')+'</span><br><span style="color:#666;font-size:11px">'+esc((item.comment_text||'').slice(0,40)+(item.comment_text&&item.comment_text.length>40?'...':''))+'</span></div><button class="actions" style="display:inline-block;border:1px solid #ddd;background:var(--w);border-radius:6px;padding:3px 7px;font-size:11px;font-family:inherit;cursor:pointer;color:var(--r);flex-shrink:0" onclick="delReply(\''+esc(item.id)+'\');" title="Удалить из очереди">✕</button></div>').join('')+'</div>';
+    if(rq.pending>0){rqHtml+='<div style="margin-top:10px;display:flex;gap:8px"><button class="actions" style="display:inline-block;border:1px solid var(--b);background:var(--w);border-radius:8px;padding:5px 10px;font-size:12px;font-family:inherit;cursor:pointer;color:var(--n);transition:.15s" onclick="sendReplyOne()" title="Отправить один ответ из очереди">Отправить 1</button><button class="actions" style="display:inline-block;border:1px solid var(--b);background:var(--w);border-radius:8px;padding:5px 10px;font-size:12px;font-family:inherit;cursor:pointer;color:var(--n);transition:.15s" onclick="sendReplyAll()" title="Отправить все ответы из очереди подряд">Отправить все</button></div>';}
   }
   document.getElementById('reply_queue').innerHTML=rqTot?rqHtml:'<div class="muted">Очередь пуста</div>';
   const ev=d.events||[];
