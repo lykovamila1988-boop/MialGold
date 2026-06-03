@@ -1160,6 +1160,34 @@ def api_operator_task(task_id: str, action: str):
     return jsonify({"ok": bool(rec.get("id")), "task": rec}), (200 if rec.get("id") else 400)
 
 
+@app.post("/api/reply-send-one")
+def api_reply_send_one():
+    """Отправить один ответ из очереди в Instagram (вручную из оператора)."""
+    # Динамически импортируем reply_sender чтобы избежать циклических импортов.
+    import sys as _sys
+    _tools_dir = str(base.MILA_FOLDER / "mila-office")
+    if _tools_dir not in _sys.path:
+        _sys.path.insert(0, _tools_dir)
+    try:
+        import reply_sender
+    except ImportError:
+        return jsonify({"ok": False, "error": "reply_sender модуль не найден"}), 500
+
+    rep = memory.dequeue_reply()
+    if not rep:
+        return jsonify({"ok": False, "error": "В очереди нет ответов"}), 400
+
+    ok, err, resp_id = reply_sender.post_reply(rep["comment_id"], rep["message"])
+    if ok:
+        memory.mark_reply(rep["id"], "sent", response_id=resp_id)
+        logger.info("Manual reply sent: %s → %s", rep["id"], rep["comment_id"])
+        return jsonify({"ok": True, "detail": f"@{rep.get('username', '?')}"})
+    else:
+        memory.mark_reply(rep["id"], "failed", error=err)
+        logger.warning("Manual reply failed: %s: %s", rep["id"], err)
+        return jsonify({"ok": False, "error": err}), 400
+
+
 @app.get("/favicon.ico")
 def favicon():
     # Браузер всегда просит /favicon.ico — без маршрута это 404 в консоли.
@@ -2007,6 +2035,17 @@ function actions(t){
     '<button onclick="act(\''+esc(t.id)+'\',\'unblock\')">разблок.</button>'+
     '<button onclick="act(\''+esc(t.id)+'\',\'cancel\')">отменить</button></div>';
 }
+async function sendReplyOne(){
+  const btn=event.target;
+  btn.disabled=true; btn.textContent='Отправляю…';
+  try{
+    const r=await fetch('/api/reply-send-one',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':CSRF}});
+    const d=await r.json();
+    toast(d.ok?('Отправлен: '+d.detail):('Ошибка: '+(d.error||'?')));
+  }catch(e){ toast('Сеть: '+e); }
+  btn.disabled=false; btn.textContent='Отправить следующий';
+  load();
+}
 // Человеческие имена пайплайнов — чтобы оператор видел «Контент на неделю», а не content_week.
 const PNAME={content_week:'Контент на неделю',new_client:'Новая клиентка',monday_brief:'Утренний бриф',
   weekly_report:'Недельный отчёт',competitive_analysis:'Анализ конкурентов',product_research:'Исследование продукта',
@@ -2065,7 +2104,9 @@ async function load(){
   const rqTot=(rq.pending||0)+(rq.sent||0)+(rq.failed||0);
   let rqHtml='<div class="muted">в очереди: '+esc(rq.pending||0)+' · отправлено: '+esc(rq.sent||0)+' · ошибок: '+esc(rq.failed||0)+'</div>';
   const items=(rq.items_pending||[]).slice(0,5);
-  if(items.length){rqHtml+='<div style="margin-top:8px;font-size:12px">'+items.map(item=>'<div style="border-bottom:1px solid #E0D0C8;padding:6px 0"><span style="color:var(--u)">@'+esc(item.username||'?')+'</span><br><span style="color:#666;font-size:11px">'+esc((item.comment_text||'').slice(0,60)+(item.comment_text&&item.comment_text.length>60?'...':''))+'</span></div>').join('')+'</div>';}
+  if(items.length){rqHtml+='<div style="margin-top:8px;font-size:12px">'+items.map(item=>'<div style="border-bottom:1px solid #E0D0C8;padding:6px 0"><span style="color:var(--u)">@'+esc(item.username||'?')+'</span><br><span style="color:#666;font-size:11px">'+esc((item.comment_text||'').slice(0,60)+(item.comment_text&&item.comment_text.length>60?'...':''))+'</span></div>').join('')+'</div>';
+    if(rq.pending>0){rqHtml+='<div style="margin-top:10px"><button class="actions" style="display:inline-block;border:1px solid var(--b);background:var(--w);border-radius:8px;padding:5px 10px;font-size:12px;font-family:inherit;cursor:pointer;color:var(--n);transition:.15s" onclick="sendReplyOne()" title="Отправить один ответ из очереди вручную">Отправить следующий</button></div>';}
+  }
   document.getElementById('reply_queue').innerHTML=rqTot?rqHtml:'<div class="muted">Очередь пуста</div>';
   const ev=d.events||[];
   document.getElementById('events').innerHTML=ev.length?ev.map(e=>'<div class="event">'+esc(e.kind)+'<div class="muted">'+esc(e.ts)+' · '+esc(JSON.stringify(e.payload||{}))+'</div></div>').join(''):'<div class="muted">Событий нет</div>';
