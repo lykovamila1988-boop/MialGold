@@ -106,16 +106,15 @@ def _chips(mod):
 AGENTS = {
     "marina": {
         "name": "Марина", "role": "Маркетолог", "emoji": "📣", "color": "#C4614A",
-        "intro": "Привет, Людмила! 👋 Я Марина — твой маркетолог по личному бренду.\n\n"
-                 "Я знаю твою нишу, продукты и цели. Готова помочь с контентом, "
-                 "стратегией роста и монетизацией.\n\nС чего начнём? Выбери быстрое "
-                 "действие внизу — или напиши свой вопрос.",
+        "intro": "Привет! 👋 Я Марина. Давай сегодня: прочитаю комментарии и подготовлю ответы, "
+                 "соберу аналитику за неделю, напишу Reels или карусель, спланирую стратегию. "
+                 "Выбери внизу или скажи, что нужно.",
         "responder": _marina_responder(), "chips": _chips(marina),
     },
     "victoria": {
         "name": "Виктория", "role": "Редактор", "emoji": "✍️", "color": "#4A7A5E",
-        "intro": "Я Виктория, редактор. Пришли текст поста — проверю голос, "
-                 "пунктуацию, хук и CTA, дам оценку и финальную версию.",
+        "intro": "Я Виктория. Хочешь, я прочитаю последние посты и оценю их? Или пришлёшь текст "
+                 "на редактуру — проверю голос, хук, CTA и дам финальную версию.",
         "responder": _office_responder(_mods["victoria"], "victoria"), "chips": _chips(_mods["victoria"]),
     },
     "alina": {
@@ -150,8 +149,8 @@ AGENTS = {
     },
     "lera": {
         "name": "Лера", "role": "Продажи", "emoji": "🎯", "color": "#A84F3C",
-        "intro": "Я Лера, продажи. Напишу продающие тексты, разберу воронку и придумаю "
-                 "акции для практикума.",
+        "intro": "Я Лера, продажи. Хочешь, я напишу продающий текст для практикума? Или посмотрим "
+                 "воронку, конверсию и какие акции запустить? Выбери внизу или скажи свою идею.",
         "responder": _office_responder(_mods["lera"], "lera"), "chips": _chips(_mods["lera"]),
     },
     "manager": {
@@ -1089,12 +1088,29 @@ def api_operator():
         k: v for k, v in approvals.items()
         if v.get("status") in {"pending", "missing", "changes_requested"}
     }
+    supervisor = memory.read_supervisor_status()
+    try:
+        n8n_url = os.getenv("N8N_BASE_URL", "http://127.0.0.1:5678").rstrip("/")
+        bridge_port = os.getenv("N8N_BRIDGE_PORT", "5051")
+        services = {
+            "webapp": {"up": True, "status": 200},
+            "bridge": _probe(f"http://127.0.0.1:{bridge_port}/health"),
+            "n8n": _probe(f"{n8n_url}/healthz"),
+        }
+        supervisor = {
+            **supervisor,
+            "ok": all(bool(v.get("up")) for v in services.values()),
+            "status": "ok" if all(bool(v.get("up")) for v in services.values()) else "degraded",
+            "services": services,
+        }
+    except Exception:
+        logger.exception("operator live supervisor status failed")
     return jsonify({
         "ok": True,
         "csrf": _csrf_token(),
         "tasks": tasks,
         "status": memory.office_status(limit=30),
-        "supervisor": memory.read_supervisor_status(),
+        "supervisor": supervisor,
         "events": memory.recent_events(30),
         "pending_approvals": pending_approvals,
     })
