@@ -976,6 +976,17 @@ def api_operator_task(task_id: str, action: str):
     return jsonify({"ok": bool(rec.get("id")), "task": rec}), (200 if rec.get("id") else 400)
 
 
+@app.get("/favicon.ico")
+def favicon():
+    # Браузер всегда просит /favicon.ico — без маршрута это 404 в консоли.
+    # Отдаём маленькую SVG-иконку в фирменном цвете (буква M), 404 уходит.
+    svg = ("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'>"
+           "<rect width='32' height='32' rx='7' fill='#C4614A'/>"
+           "<text x='16' y='23' font-size='19' text-anchor='middle' fill='#fff'"
+           " font-family='Georgia,serif'>M</text></svg>")
+    return Response(svg, mimetype="image/svg+xml")
+
+
 @app.get("/")
 def index():
     return Response(INDEX_HTML, mimetype="text/html")
