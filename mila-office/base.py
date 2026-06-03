@@ -533,7 +533,14 @@ def compose_system(key: str, system: str) -> str:
            "Если в конце твоего ответа добавить [→ rita] (где rita — ключ агента), " \
            "интерфейс выделит это действие как рекомендуемое. " \
            "Пример: 'Вот структура... [→ victoria]' → пользователю предложится редактура у Виктории. " \
-           "Это необязательно — next actions предложены интерфейсом по умолчанию, но ты можешь подсказать лучший следующий шаг."
+           "Это необязательно — next actions предложены интерфейсом по умолчанию, но ты можешь подсказать лучший следующий шаг.\n\n" \
+           "# ─ Статус работы (VERDICT) ─\n" \
+           "В конце своего ответа указывай VERDICT в одной из форм:\n" \
+           "  [VERDICT: ready_next] — работа готова, пусть следующий агент продолжает\n" \
+           "  [VERDICT: needs_revision] — нужны правки (вернись к предыдущему этапу)\n" \
+           "  [VERDICT: done] — работа завершена, можно публиковать\n" \
+           "Пример: 'Всё проверено и отредактировано. [VERDICT: ready_next] [→ rita]'\n" \
+           "VERDICT обязателен для document workflow tracking и помогает системе понять что дальше."
     return out
 
 # ─── AGENT RUNNER ────────────────────────────────────────
@@ -702,10 +709,17 @@ def _run_anthropic_agent(client, system: str, tools: list, tool_handler, message
     if client is None:
         client = get_client()
 
+    # Prompt caching: system+tools — стабильный префикс, который шлётся заново на
+    # КАЖДОМ витке tool-loop и в каждом сообщении чата. Помечаем его cache_control,
+    # чтобы Anthropic кэшировал (повторное чтение ~в 10× дешевле). Порядок в API —
+    # tools → system → messages, поэтому один маркер на system кэширует и tools.
+    system_cached = [{"type": "text", "text": system,
+                      "cache_control": {"type": "ephemeral"}}]
+
     while True:
         resp = client.messages.create(
             model=MODEL, max_tokens=MAX_TOKENS,
-            system=system, tools=tools, messages=messages
+            system=system_cached, tools=tools, messages=messages
         )
         texts, calls = [], []
         for b in resp.content:

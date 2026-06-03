@@ -334,29 +334,83 @@ def _extract_docx_text(raw: bytes) -> tuple[str, str]:
         return "", f"Could not read DOCX: {type(e).__name__}"
 
 
+def _image_feedback_prompt() -> str:
+    return (
+        "Ты читаешь скриншот для последующего фидбека от агента MILA Office.\n"
+        "1. Сначала сделай OCR: перепиши весь видимый текст максимально полно, включая сообщения чата, "
+        "ошибки консоли, кнопки, статусы и короткие фразы пользователя.\n"
+        "2. Отдельно выпиши, какая проблема видна на скриншоте и где она находится.\n"
+        "3. Если это интерфейс чата, отметь, что пользователь хотел сделать и что ответил агент.\n"
+        "4. Не отвечай, что не можешь прочитать изображение, если текст хотя бы частично виден. "
+        "Лучше перепиши видимые фрагменты и явно пометь неразборчивые места как [неразборчиво]."
+    )
+
+
+def _describe_image_with_claude(raw: bytes, mime: str) -> tuple[str, str]:
+    if not (base.ANTHROPIC_KEY or base.ANTHROPIC_AUTH_TOKEN):
+        return "", "Claude Vision недоступен: ANTHROPIC_API_KEY не настроен."
+    client = _client or base.get_client()
+    if client is None:
+        return "", "Claude Vision недоступен: клиент Anthropic не настроен."
+    try:
+        resp = client.messages.create(
+            model=base.MODEL,
+            max_tokens=2200,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": _image_feedback_prompt()},
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": mime,
+                            "data": base64.b64encode(raw).decode("ascii"),
+                        },
+                    },
+                ],
+            }],
+        )
+        text = "\n".join(
+            getattr(part, "text", "") for part in getattr(resp, "content", [])
+            if getattr(part, "type", "") == "text" and getattr(part, "text", "")
+        ).strip()
+        return text, "" if text else "Claude Vision не вернул текстовое описание изображения."
+    except Exception as e:
+        return "", f"Claude Vision не смог прочитать изображение: {type(e).__name__}"
+
+
 def _describe_image_with_gemini(raw: bytes, mime: str) -> tuple[str, str]:
     if not getattr(base, "GEMINI_KEY", ""):
-        return "", "Картинка загружена, но GEMINI_KEY не настроен, поэтому я не могу увидеть изображение."
+        return _describe_image_with_claude(raw, mime)
     payload = {
         "contents": [{
             "role": "user",
             "parts": [
-                {"text": "Опиши изображение для последующего фидбека. Если на изображении есть текст, перепиши его полностью. Затем кратко оцени визуальную структуру, читаемость, стиль и заметные проблемы."},
+                {"text": _image_feedback_prompt()},
                 {"inline_data": {"mime_type": mime, "data": base64.b64encode(raw).decode("ascii")}},
             ],
         }],
-        "generationConfig": {"maxOutputTokens": 1600},
+        "generationConfig": {"maxOutputTokens": 2200},
     }
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{base.GEMINI_MODEL}:generateContent"
     try:
         r = requests.post(url, params={"key": base.GEMINI_KEY}, json=payload, timeout=60)
         if r.status_code != 200:
-            return "", f"Картинка загружена, но Gemini Vision вернул HTTP {r.status_code}."
+            text, warning = _describe_image_with_claude(raw, mime)
+            if text:
+                return text, f"Gemini Vision вернул HTTP {r.status_code}; использован Claude Vision."
+            return "", f"Картинка загружена, но Gemini Vision вернул HTTP {r.status_code}. {warning}"
         parts = r.json().get("candidates", [{}])[0].get("content", {}).get("parts", [])
         text = "\n".join(p.get("text", "") for p in parts if p.get("text")).strip()
-        return text, "" if text else "Картинка загружена, но описание не получено."
+        if text:
+            return text, ""
+        return _describe_image_with_claude(raw, mime)
     except Exception as e:
-        return "", f"Картинка загружена, но описание не удалось получить: {type(e).__name__}"
+        text, warning = _describe_image_with_claude(raw, mime)
+        if text:
+            return text, f"Gemini Vision не сработал ({type(e).__name__}); использован Claude Vision."
+        return "", f"Картинка загружена, но описание не удалось получить: {type(e).__name__}. {warning}"
 
 
 def _extract_upload(filename: str, raw: bytes, mime: str) -> tuple[str, str]:
@@ -389,14 +443,32 @@ def _set_job(job_id, value):
             _jobs.popitem(last=False)
 
 
-def _run_job(job_id, sid, key, msg):
+def _run_job(job_id, sid, key, msg, attachment=None):
     """Выполняется в фоновом потоке: вызывает агента, обновляет историю и job."""
     try:
         with _locks[key]:  # сериализуем вызовы одного агента; разные агенты идут параллельно
             histories = _session_histories(sid)
             reply, new_hist = AGENTS[key]["responder"](msg, histories[key])
             histories[key] = _trim(new_hist)
-        _set_job(job_id, {"status": "done", "sid": sid, "reply": reply})
+        # Document workflow tracking: если был attachment (загруженный файл), сохраняем этап
+        doc_id = None
+        if attachment:
+            doc_id = attachment.get("_doc_id")
+            if not doc_id:
+                result = memory.start_document_workflow(
+                    attachment.get("name", "document"),
+                    attachment.get("text", "")
+                )
+                doc_id = result.get("doc_id")
+                attachment["_doc_id"] = doc_id
+            # Парсим VERDICT из ответа
+            verdict = "ready_next"
+            verdict_match = re.search(r"\[VERDICT:\s*(\w+)\]", reply)
+            if verdict_match:
+                verdict = verdict_match.group(1)
+            memory.add_workflow_stage(doc_id, agent=key, input_text=msg, output_text=reply, verdict=verdict)
+
+        _set_job(job_id, {"status": "done", "sid": sid, "reply": reply, "doc_id": doc_id})
     except Exception:
         logger.exception("Ошибка агента %s (job %s)", key, job_id)
         _set_job(job_id, {"status": "done", "sid": sid, "error": "Внутренняя ошибка — см. логи (logs/webapp.log)"})
@@ -443,12 +515,14 @@ def upload_file():
         return jsonify({"ok": False, "error": "Файл слишком большой. Максимум 12 МБ."}), 413
     name = _safe_upload_name(f.filename)
     mime = (f.mimetype or mimetypes.guess_type(name)[0] or "application/octet-stream").lower()
+    suffix = Path(name).suffix.lower()
+    kind = "image" if (mime.startswith("image/") or suffix in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}) else "file"
     text, warning = _extract_upload(name, raw, mime)
     text = _clip_text(text)
     if not text and warning:
         text = warning
     upload_id = uuid.uuid4().hex
-    _set_upload(upload_id, {"sid": sid, "name": name, "mime": mime, "text": text, "warning": warning})
+    _set_upload(upload_id, {"sid": sid, "name": name, "mime": mime, "kind": kind, "text": text, "warning": warning})
     return jsonify({
         "ok": True,
         "upload_id": upload_id,
@@ -479,17 +553,28 @@ def chat():
     # Не блокируем запрос на время раздумий агента — ставим задачу в пул.
     if attachment:
         ask = msg or "Дай фидбек по загруженному файлу."
-        msg = (
-            f"{ask}\n\n"
-            f"Пользователь загрузил файл: {attachment.get('name')} ({attachment.get('mime')}).\n"
-            "Дай конкретный фидбек на основе содержимого файла: что работает, что улучшить, "
-            "какие правки внести и следующий практический шаг.\n\n"
-            "--- Содержимое / описание файла ---\n"
-            f"{attachment.get('text', '')}"
-        )
+        if attachment.get("kind") == "image":
+            msg = (
+                f"{ask}\n\n"
+                f"Пользователь загрузил скриншот/изображение: {attachment.get('name')} ({attachment.get('mime')}).\n"
+                "Ниже уже дан OCR и визуальный разбор скриншота. Используй этот текст как содержимое изображения. "
+                "Не отвечай, что не можешь прочитать скриншот, если в блоке ниже есть извлечённые фрагменты. "
+                "Найди проблему, объясни её по делу и предложи следующий практический шаг.\n\n"
+                "--- OCR / визуальный разбор скриншота ---\n"
+                f"{attachment.get('text', '')}"
+            )
+        else:
+            msg = (
+                f"{ask}\n\n"
+                f"Пользователь загрузил файл: {attachment.get('name')} ({attachment.get('mime')}).\n"
+                "Дай конкретный фидбек на основе содержимого файла: что работает, что улучшить, "
+                "какие правки внести и следующий практический шаг.\n\n"
+                "--- Содержимое / описание файла ---\n"
+                f"{attachment.get('text', '')}"
+            )
     job_id = uuid.uuid4().hex
     _set_job(job_id, {"status": "pending", "sid": sid})
-    _pool.submit(_run_job, job_id, sid, key, msg)
+    _pool.submit(_run_job, job_id, sid, key, msg, attachment)
     return jsonify({"job": job_id}), 202
 
 
@@ -1230,6 +1315,15 @@ def api_reply_delete(reply_id: str):
     return jsonify({"ok": False, "error": "Ответ не найден"}), 400
 
 
+@app.get("/api/document/<doc_id>")
+def api_document(doc_id: str):
+    """Получить историю документа через все этапы обработки."""
+    doc = memory.get_document_workflow(doc_id)
+    if doc.get("ok") is False:
+        return jsonify({"ok": False, "error": "Document not found"}), 404
+    return jsonify({"ok": True, "document": doc})
+
+
 @app.get("/favicon.ico")
 def favicon():
     # Браузер всегда просит /favicon.ico — без маршрута это 404 в консоли.
@@ -1338,7 +1432,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
     </footer>
   </div>
 <script>
-let AGENTS=[], cur=null, CSRF='', activeJob=null, pendingUpload=null;
+let AGENTS=[], cur=null, CSRF='', activeJob=null, pendingUpload=null, currentDocId=null;
 
 async function postJSON(url, payload){
   const body=JSON.stringify(payload||{});
@@ -1481,11 +1575,16 @@ function addMsg(text, me, actions){
   drawMsg(text, me, savedActions);
 }
 
-function runNextAction(action, context){
+async function runNextAction(action, context){
   if(activeJob) return;
   if(action.agent && action.agent!==cur) switchAgent(action.agent);
   const inp=document.getElementById('inp');
-  inp.value=action.prompt+'\n\nКонтекст предыдущего шага:\n'+context;
+  let fullPrompt=action.prompt+'\n\nКонтекст предыдущего шага:\n'+context;
+  // Если есть currentDocId (загруженный документ), передаём ссылку на его историю
+  if(currentDocId){
+    fullPrompt+='\n\n[doc_id:'+currentDocId+']\nЭтот материал уже прошёл обработку, см. /api/document/'+currentDocId;
+  }
+  inp.value=fullPrompt;
   inp.style.height='auto';
   inp.style.height=Math.min(inp.scrollHeight,160)+'px';
   inp.focus();
@@ -1581,7 +1680,11 @@ async function send(){
       activeJob=null;
       if(!d || d.status==='pending') { addMsg('Ответ ещё готовится. Обнови страницу или попробуй ещё раз через пару минут.',false); return; }
       if(d.error) addMsg('⚠️ Ошибка: '+d.error,false);
-      else addMsg(d.reply,false,nextActionsFor(cur));
+      else {
+        // Сохраняем doc_id если есть (для document workflow tracking)
+        if(d.doc_id) currentDocId=d.doc_id;
+        addMsg(d.reply,false,nextActionsFor(cur));
+      }
     }
   }catch(e){ addMsg('⚠️ Сеть недоступна: '+e,false); }
   t.style.display='none'; document.getElementById('send').disabled=false; inp.focus();

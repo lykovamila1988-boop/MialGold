@@ -38,6 +38,7 @@ APPROVALS = MEM_DIR / "approvals.json"
 RATE_LIMITS = MEM_DIR / "rate_limits.json"
 SUPERVISOR_STATUS = MEM_DIR / "supervisor_status.json"
 REPLY_QUEUE = MEM_DIR / "reply_queue.json"
+DOC_WORKFLOWS = MEM_DIR / "doc_workflows.json"
 _LOCK = MEM_DIR / ".lock"
 ACTIVE_TASK_STATUSES = {"pending", "running"}
 
@@ -963,6 +964,71 @@ def current_phase() -> str:
     if posts >= _PHASE_LEARNING_POSTS:
         return "learning"
     return "cold_start"
+
+
+# ─── Document Workflow Tracking ──────────────────────────
+# Отслеживание пути документа через агентов: оригинал → Виктория → Рита → Марина → ...
+# Каждый этап сохраняет input, output, agent, verdict (ready_next / needs_revision / done)
+
+def start_document_workflow(file_name: str, file_content: str) -> dict:
+    """Начать workflow документа. Возвращает {doc_id, created_at}."""
+    import uuid
+    doc_id = str(uuid.uuid4())[:8]
+    workflows = _read_json(DOC_WORKFLOWS, {})
+    workflows[doc_id] = {
+        "id": doc_id,
+        "file_name": file_name,
+        "original_content": file_content[:2000],  # первые 2000 chars для истории
+        "stages": [],
+        "current_stage": 0,
+        "current_agent": None,
+        "created_at": _now(),
+        "status": "in_progress",
+    }
+    with _FileLock():
+        _write_json(DOC_WORKFLOWS, workflows)
+    log_event(f"doc:workflow:start", {"doc_id": doc_id, "file": file_name})
+    return {"doc_id": doc_id, "created_at": workflows[doc_id]["created_at"]}
+
+
+def add_workflow_stage(doc_id: str, agent: str, input_text: str, output_text: str,
+                       verdict: str = "ready_next") -> dict:
+    """Добавить этап: агент обработал документ. Возвращает {stage_idx, ...}."""
+    workflows = _read_json(DOC_WORKFLOWS, {})
+    if doc_id not in workflows:
+        return {"ok": False, "error": f"doc {doc_id} not found"}
+    doc = workflows[doc_id]
+    stage = {
+        "agent": agent,
+        "input": input_text[:500],  # краткий summary input
+        "output": output_text[:500],  # краткий summary output
+        "verdict": verdict,  # ready_next / needs_revision / done
+        "timestamp": _now(),
+    }
+    doc["stages"].append(stage)
+    doc["current_stage"] = len(doc["stages"])
+    doc["current_agent"] = agent
+    if verdict == "done":
+        doc["status"] = "completed"
+    with _FileLock():
+        _write_json(DOC_WORKFLOWS, workflows)
+    log_event(f"doc:workflow:stage", {"doc_id": doc_id, "agent": agent, "verdict": verdict})
+    return {"ok": True, "doc_id": doc_id, "stage_idx": len(doc["stages"]) - 1}
+
+
+def get_document_workflow(doc_id: str) -> dict:
+    """Получить весь workflow документа."""
+    workflows = _read_json(DOC_WORKFLOWS, {})
+    return workflows.get(doc_id) or {"ok": False, "error": "not found"}
+
+
+def list_workflows(status: str = None, limit: int = 20) -> list:
+    """Список workflows, опционально фильтруя по статусу."""
+    workflows = _read_json(DOC_WORKFLOWS, {})
+    docs = list(workflows.values())
+    if status:
+        docs = [d for d in docs if d.get("status") == status]
+    return sorted(docs, key=lambda d: d.get("created_at", ""), reverse=True)[:limit]
 
 
 if __name__ == "__main__":
