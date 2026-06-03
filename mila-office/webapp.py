@@ -19,9 +19,11 @@ try:
 except Exception:
     pass
 
+import base64
 import importlib
 import json
 import logging
+import mimetypes
 import os
 import re
 import secrets
@@ -185,11 +187,17 @@ _jobs_lock = threading.Lock()
 # Фоновые задачи: агент может думать десятки секунд. Не держим HTTP-запрос
 # открытым — кладём вызов в пул, фронтенд опрашивает /api/result.
 _pool = ThreadPoolExecutor(max_workers=4)
+_uploads = OrderedDict() # upload_id -> {"sid": ..., "name": ..., "text": ...}
 _jobs = OrderedDict()    # job_id -> {"status": ...}; ограничен по размеру, читается один раз
 MAX_JOBS = 200           # бэкстоп против утечки незабранных задач
 MAX_HISTORY_MSGS = 40    # ~20 последних реплик user/assistant на агента (защита памяти/токенов)
 
+MAX_UPLOADS = 80
+MAX_UPLOAD_BYTES = 12 * 1024 * 1024
+MAX_EXTRACTED_CHARS = 30000
+
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_BYTES
 # Нужен для session (CSRF + OAuth-state). Ключ ДОЛЖЕН переживать перезапуск, иначе
 # каждый рестарт инвалидирует session-cookie открытой вкладки → старый CSRF-токен не
 # сходится с новым → POST /api/chat падает 403 (фронт ловит как «Сеть недоступна»).
@@ -263,6 +271,92 @@ def _trim(history):
     return history[-MAX_HISTORY_MSGS:] if len(history) > MAX_HISTORY_MSGS else history
 
 
+def _safe_upload_name(name: str) -> str:
+    name = os.path.basename(name or "upload")
+    name = re.sub(r"[^A-Za-z0-9._ -]+", "_", name).strip(" ._")
+    return name[:120] or "upload"
+
+
+def _clip_text(text: str) -> str:
+    text = (text or "").replace("\x00", "").strip()
+    return text[:MAX_EXTRACTED_CHARS]
+
+
+def _decode_text_file(raw: bytes) -> str:
+    for enc in ("utf-8-sig", "utf-8", "cp1251", "cp1252"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
+def _extract_pdf_text(raw: bytes) -> tuple[str, str]:
+    import io
+    try:
+        from pypdf import PdfReader
+    except Exception:
+        try:
+            from PyPDF2 import PdfReader
+        except Exception:
+            return "", "PDF загружен, но библиотека pypdf/PyPDF2 не установлена. Установи pypdf, чтобы читать текст PDF."
+    try:
+        reader = PdfReader(io.BytesIO(raw))
+        pages = []
+        for page in reader.pages[:30]:
+            pages.append(page.extract_text() or "")
+        text = "\n\n".join(pages).strip()
+        if not text:
+            return "", "PDF загружен, но текст не найден. Возможно, это скан; загрузи картинку или установи OCR."
+        return text, ""
+    except Exception as e:
+        return "", f"Не удалось прочитать PDF: {type(e).__name__}"
+
+
+def _describe_image_with_gemini(raw: bytes, mime: str) -> tuple[str, str]:
+    if not getattr(base, "GEMINI_KEY", ""):
+        return "", "Картинка загружена, но GEMINI_KEY не настроен, поэтому я не могу увидеть изображение."
+    payload = {
+        "contents": [{
+            "role": "user",
+            "parts": [
+                {"text": "Опиши изображение для последующего фидбека. Если на изображении есть текст, перепиши его полностью. Затем кратко оцени визуальную структуру, читаемость, стиль и заметные проблемы."},
+                {"inline_data": {"mime_type": mime, "data": base64.b64encode(raw).decode("ascii")}},
+            ],
+        }],
+        "generationConfig": {"maxOutputTokens": 1600},
+    }
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{base.GEMINI_MODEL}:generateContent"
+    try:
+        r = requests.post(url, params={"key": base.GEMINI_KEY}, json=payload, timeout=60)
+        if r.status_code != 200:
+            return "", f"Картинка загружена, но Gemini Vision вернул HTTP {r.status_code}."
+        parts = r.json().get("candidates", [{}])[0].get("content", {}).get("parts", [])
+        text = "\n".join(p.get("text", "") for p in parts if p.get("text")).strip()
+        return text, "" if text else "Картинка загружена, но описание не получено."
+    except Exception as e:
+        return "", f"Картинка загружена, но описание не удалось получить: {type(e).__name__}"
+
+
+def _extract_upload(filename: str, raw: bytes, mime: str) -> tuple[str, str]:
+    suffix = Path(filename).suffix.lower()
+    mime = (mime or mimetypes.guess_type(filename)[0] or "").lower()
+    if suffix in {".txt", ".md", ".csv", ".json", ".html", ".htm", ".rtf"} or mime.startswith("text/"):
+        return _decode_text_file(raw), ""
+    if suffix == ".pdf" or mime == "application/pdf":
+        return _extract_pdf_text(raw)
+    if mime.startswith("image/") or suffix in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}:
+        return _describe_image_with_gemini(raw, mime or "image/png")
+    return "", "Поддерживаются текстовые файлы, PDF и изображения."
+
+
+def _set_upload(upload_id: str, value: dict):
+    _uploads[upload_id] = value
+    _uploads.move_to_end(upload_id)
+    while len(_uploads) > MAX_UPLOADS:
+        _uploads.popitem(last=False)
+
+
 def _set_job(job_id, value):
     """Кладёт результат задачи и держит размер _jobs под MAX_JOBS (FIFO-вытеснение)."""
     with _jobs_lock:
@@ -315,17 +409,61 @@ def meta():
     })
 
 
+@app.post("/api/upload")
+def upload_file():
+    sid = _session_id()
+    f = request.files.get("file")
+    if not f or not f.filename:
+        return jsonify({"ok": False, "error": "Файл не выбран"}), 400
+    raw = f.read(MAX_UPLOAD_BYTES + 1)
+    if len(raw) > MAX_UPLOAD_BYTES:
+        return jsonify({"ok": False, "error": "Файл слишком большой. Максимум 12 МБ."}), 413
+    name = _safe_upload_name(f.filename)
+    mime = (f.mimetype or mimetypes.guess_type(name)[0] or "application/octet-stream").lower()
+    text, warning = _extract_upload(name, raw, mime)
+    text = _clip_text(text)
+    if not text and warning:
+        text = warning
+    upload_id = uuid.uuid4().hex
+    _set_upload(upload_id, {"sid": sid, "name": name, "mime": mime, "text": text, "warning": warning})
+    return jsonify({
+        "ok": True,
+        "upload_id": upload_id,
+        "name": name,
+        "mime": mime,
+        "chars": len(text),
+        "warning": warning,
+        "excerpt": text[:700],
+    })
+
+
 @app.post("/api/chat")
 def chat():
     sid = _session_id()
     data = request.get_json(force=True)
     key = data.get("agent")
     msg = (data.get("message") or "").strip()
+    upload_id = (data.get("upload_id") or "").strip()
     if key not in AGENTS:
         return jsonify({"error": "Неизвестный агент"}), 400
-    if not msg:
+    attachment = None
+    if upload_id:
+        attachment = _uploads.get(upload_id)
+        if not attachment or attachment.get("sid") != sid:
+            return jsonify({"error": "Файл не найден. Загрузи его ещё раз."}), 400
+    if not msg and not attachment:
         return jsonify({"error": "Пустое сообщение"}), 400
     # Не блокируем запрос на время раздумий агента — ставим задачу в пул.
+    if attachment:
+        ask = msg or "Дай фидбек по загруженному файлу."
+        msg = (
+            f"{ask}\n\n"
+            f"Пользователь загрузил файл: {attachment.get('name')} ({attachment.get('mime')}).\n"
+            "Дай конкретный фидбек на основе содержимого файла: что работает, что улучшить, "
+            "какие правки внести и следующий практический шаг.\n\n"
+            "--- Содержимое / описание файла ---\n"
+            f"{attachment.get('text', '')}"
+        )
     job_id = uuid.uuid4().hex
     _set_job(job_id, {"status": "pending", "sid": sid})
     _pool.submit(_run_job, job_id, sid, key, msg)
@@ -1048,6 +1186,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
   .inbar{display:flex;gap:12px;align-items:flex-end;max-width:1000px;margin:0 auto}
   #inp{flex:1;border:1px solid var(--b);border-radius:22px;padding:13px 20px;font-size:15px;font-family:inherit;resize:none;max-height:160px;outline:none;background:var(--w)}
   #inp:focus{border-color:var(--t)}
+  #fileBtn{width:46px;height:46px;border-radius:50%;border:1px solid var(--b);background:var(--w);color:var(--t);font-size:20px;cursor:pointer;flex-shrink:0}
+  #fileName{max-width:260px;color:var(--u);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   #send{width:46px;height:46px;border-radius:50%;border:none;background:var(--t);color:#fff;font-size:18px;cursor:pointer;flex-shrink:0}
   #send:disabled{opacity:.4;cursor:default}
   .hint{text-align:center;font-size:11px;color:var(--u);margin-top:8px}
@@ -1067,6 +1207,9 @@ INDEX_HTML = r"""<!DOCTYPE html>
     <div class="typing" id="typing" style="display:none"></div>
     <footer>
       <div class="inbar">
+        <input id="fileInp" type="file" accept=".txt,.md,.csv,.json,.pdf,image/*" style="display:none">
+        <button id="fileBtn" title="Прикрепить файл">📎</button>
+        <div id="fileName"></div>
         <textarea id="inp" rows="1" placeholder="Напиши сообщение…"></textarea>
         <button id="send" title="Отправить">➤</button>
       </div>
@@ -1074,7 +1217,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
     </footer>
   </div>
 <script>
-let AGENTS=[], cur=null, CSRF='';
+let AGENTS=[], cur=null, CSRF='', activeJob=null, pendingUpload=null;
 
 async function postJSON(url, payload){
   const body=JSON.stringify(payload||{});
@@ -1145,29 +1288,61 @@ function renderAgent(){
 
 function switchAgent(k){ cur=k; renderAgent(); }
 
+async function uploadSelectedFile(file){
+  if(!file) return;
+  const label=document.getElementById('fileName');
+  label.textContent='Загружаю: '+file.name;
+  const fd=new FormData(); fd.append('file', file);
+  let r=await fetch('/api/upload',{method:'POST',headers:{'X-CSRF-Token':CSRF},body:fd});
+  if(r.status===403){
+    try{ const m=await (await fetch('/api/meta')).json(); CSRF=m.csrf; }catch(e){}
+    r=await fetch('/api/upload',{method:'POST',headers:{'X-CSRF-Token':CSRF},body:fd});
+  }
+  const d=await r.json();
+  if(!r.ok || !d.ok){
+    pendingUpload=null;
+    label.textContent=d.error||'Файл не загрузился';
+    return;
+  }
+  pendingUpload=d;
+  label.textContent='Файл: '+d.name;
+}
+
 async function send(){
   const inp=document.getElementById('inp'); const text=inp.value.trim();
-  if(!text) return;
+  if(!text && !pendingUpload) return;
+  if(activeJob) return;
+  const upload=pendingUpload;
+  const shown=text || 'Дай фидбек по файлу';
   inp.value=''; inp.style.height='auto';
-  addMsg(text,true);
+  addMsg(upload ? (shown+'\n\n📎 '+upload.name) : shown,true);
   const t=document.getElementById('typing'); t.textContent=agent().name+' печатает…'; t.style.display='block';
   document.getElementById('send').disabled=true;
   try{
-    const r=await postJSON('/api/chat',{agent:cur,message:text});
+    const r=await postJSON('/api/chat',{agent:cur,message:text,upload_id:upload?upload.upload_id:null});
     if(!r.ok){ addMsg('⚠️ Сервер вернул '+r.status+' (попробуй обновить страницу).',false);
       t.style.display='none'; document.getElementById('send').disabled=false; return; }
     const j=await r.json();
+    pendingUpload=null; document.getElementById('fileName').textContent=''; document.getElementById('fileInp').value='';
     if(j.error){ addMsg('⚠️ Ошибка: '+j.error,false); }
     else {
       // Агент думает в фоне — опрашиваем результат, пока не готов.
       const sleep=ms=>new Promise(r=>setTimeout(r,ms));
-      let d=null;
-      while(true){
+      const abort=new AbortController();
+      const token={job:j.job, abort};
+      activeJob=token;
+      let d=null, tries=0;
+      while(activeJob===token && tries<180){
         await sleep(1000);
-        const rr=await fetch('/api/result?job='+encodeURIComponent(j.job));
-        d=await rr.json();
+        let rr=null;
+        try{ rr=await fetch('/api/result?job='+encodeURIComponent(j.job)); d=await rr.json(); }
+        catch(e){ d={error:'Сеть недоступна: '+e}; break; }
         if(d.status!=='pending') break;
+        tries++;
       }
+      if(activeJob!==token) return;
+      activeJob=null;
+      if(!d || d.status==='pending') { addMsg('Ответ ещё готовится. Обнови страницу или попробуй ещё раз через пару минут.',false); return; }
       if(d.error) addMsg('⚠️ Ошибка: '+d.error,false);
       else addMsg(d.reply,false);
     }
@@ -1234,6 +1409,9 @@ window.onload=async()=>{
   op.innerHTML='<div class="em">Q</div><div class="nm">Очередь</div>';
   op.onclick=()=>window.open('/operator','_blank'); side.appendChild(op);
   const inp=document.getElementById('inp');
+  const fileInp=document.getElementById('fileInp');
+  document.getElementById('fileBtn').onclick=()=>fileInp.click();
+  fileInp.addEventListener('change',()=>uploadSelectedFile(fileInp.files[0]));
   inp.addEventListener('keydown',e=>{ if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();} });
   inp.addEventListener('input',()=>{ inp.style.height='auto'; inp.style.height=Math.min(inp.scrollHeight,160)+'px'; });
   document.getElementById('send').onclick=send;
@@ -1736,8 +1914,9 @@ _STATUS_BAR = r"""
 #mila-sb .lbl{font-weight:bold;letter-spacing:.3px}
 #mila-sb .rsn{opacity:.92;font-size:12px}
 #mila-sb .sp{flex:1}#mila-sb .chev{opacity:.85;font-size:11px}
-#mila-sb.pill{position:fixed;top:10px;right:14px;z-index:60;border-radius:20px;padding:6px 13px;
-  border:0;box-shadow:0 2px 8px rgba(0,0,0,.18)}
+#mila-sb.pill{position:fixed;top:18px;right:18px;z-index:60;border-radius:20px;padding:6px 13px;
+  border:0;box-shadow:0 2px 8px rgba(0,0,0,.18);max-width:min(320px,calc(100vw - 36px))}
+body:has(#side) header{padding-right:360px}
 #mila-sb.pill .rsn,#mila-sb.pill .sp{display:none}
 #mila-sb-panel{position:fixed;z-index:61;background:#fff;color:#1E140F;border:1px solid #E0D0C8;
   border-radius:12px;box-shadow:0 8px 28px rgba(0,0,0,.18);padding:12px 14px;font-size:13px;
@@ -1749,6 +1928,11 @@ _STATUS_BAR = r"""
 #mila-sb-panel .up{color:#4A7A5E}#mila-sb-panel .down{color:#A8412C}
 #mila-sb-panel .lk{margin-top:10px;display:flex;gap:12px;flex-wrap:wrap}
 #mila-sb-panel .lk a{color:#C4614A;text-decoration:none;font-size:12px}
+@media(max-width:900px){
+  body:has(#side) header{padding-right:18px;padding-bottom:52px}
+  #mila-sb.pill{top:76px;right:14px}
+  #mila-sb-panel.pill{right:14px;top:122px}
+}
 </style>
 <script>
 (function(){

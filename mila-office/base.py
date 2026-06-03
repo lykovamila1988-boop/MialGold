@@ -418,6 +418,21 @@ def agent_overrides(key: str) -> str:
     except (FileNotFoundError, OSError):
         return ""
 
+
+# Общий голос бренда (_brand_voice.md) — единый источник правды для ВСЕХ агентов,
+# пишущих тексты бренда. Подмешивается им всем, каждый применяет свою часть:
+# Марина — форматы, Рита — воркбуки, Виктория — редактура/чек-лист, Лера — продажи,
+# Тёма — Telegram. Не-контентные агенты (финансы/CRM/планировщик/менеджер) его не получают.
+CONTENT_VOICE_AGENTS = {"marina", "rita", "victoria", "lera", "tyoma"}
+_BRAND_VOICE_FILE = PROMPT_OVERRIDES_DIR / "_brand_voice.md"
+
+
+def brand_voice() -> str:
+    try:
+        return _BRAND_VOICE_FILE.read_text(encoding="utf-8")
+    except (FileNotFoundError, OSError):
+        return ""
+
 # memory.py не зависит от base (только stdlib) — импорт безопасен, цикла нет.
 try:
     import memory as _memory
@@ -506,6 +521,10 @@ def compose_system(key: str, system: str) -> str:
     preamble = _phase_preamble(key).strip()
     if preamble:
         out += "\n\n" + preamble
+    if key in CONTENT_VOICE_AGENTS:
+        voice = brand_voice().strip()
+        if voice:
+            out += "\n\n# ─ Голос бренда Людмилы (общий; применяй свою часть) ─\n" + voice
     extra = agent_overrides(key).strip()
     if extra:
         out += "\n\n# ─ Улучшения от Стаса (data-driven; см. improvement_log) ─\n" + extra
