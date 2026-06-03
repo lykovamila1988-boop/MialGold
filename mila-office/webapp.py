@@ -1129,6 +1129,11 @@ def api_operator():
         }
     except Exception:
         logger.exception("operator live supervisor status failed")
+    # Reply queue status — для виджета очереди ответов на Instagram-комментарии.
+    try:
+        reply_queue = memory.reply_queue_status(limit=10)
+    except Exception:
+        reply_queue = {"pending": 0, "sent": 0, "failed": 0, "items_pending": []}
     return jsonify({
         "ok": True,
         "csrf": _csrf_token(),
@@ -1137,6 +1142,7 @@ def api_operator():
         "supervisor": supervisor,
         "events": memory.recent_events(30),
         "pending_approvals": pending_approvals,
+        "reply_queue": reply_queue,
     })
 
 
@@ -1967,7 +1973,8 @@ OPERATOR_HTML = r"""<!DOCTYPE html>
     <div class="card scroll"><h2>Задачи</h2><div class="body" id="tasks"></div></div>
     <div class="col">
       <div class="card" style="flex:0 0 auto"><h2>Supervisor</h2><div id="supervisor" class="muted"></div></div>
-      <div class="card scroll" style="flex:0 1 auto;max-height:38%"><h2>Ждут одобрения</h2><div class="body" id="approvals"></div></div>
+      <div class="card scroll" style="flex:0 1 auto;max-height:30%"><h2>Ждут одобрения</h2><div class="body" id="approvals"></div></div>
+      <div class="card scroll" style="flex:0 1 auto;max-height:30%"><h2>Очередь ответов</h2><div class="body" id="reply_queue"></div></div>
       <div class="card scroll" style="flex:1 1 auto"><h2>Последние события</h2><div class="body" id="events"></div></div>
     </div>
   </div>
@@ -2053,6 +2060,13 @@ async function load(){
   const approvals=d.pending_approvals||{};
   const ak=Object.keys(approvals);
   document.getElementById('approvals').innerHTML=ak.length?ak.map(k=>'<div class="event"><b>'+esc(k)+'</b><div class="muted">'+esc(ST_RU[approvals[k].status]||approvals[k].status)+(approvals[k].comment?' · '+esc(approvals[k].comment):'')+'</div></div>').join(''):'<div class="muted">Нет задач на одобрении</div>';
+  // Reply queue (ответы на Instagram-комментарии)
+  const rq=d.reply_queue||{pending:0,sent:0,failed:0,items_pending:[]};
+  const rqTot=(rq.pending||0)+(rq.sent||0)+(rq.failed||0);
+  let rqHtml='<div class="muted">в очереди: '+esc(rq.pending||0)+' · отправлено: '+esc(rq.sent||0)+' · ошибок: '+esc(rq.failed||0)+'</div>';
+  const items=(rq.items_pending||[]).slice(0,5);
+  if(items.length){rqHtml+='<div style="margin-top:8px;font-size:12px">'+items.map(item=>'<div style="border-bottom:1px solid #E0D0C8;padding:6px 0"><span style="color:var(--u)">@'+esc(item.username||'?')+'</span><br><span style="color:#666;font-size:11px">'+esc((item.comment_text||'').slice(0,60)+(item.comment_text&&item.comment_text.length>60?'...':''))+'</span></div>').join('')+'</div>';}
+  document.getElementById('reply_queue').innerHTML=rqTot?rqHtml:'<div class="muted">Очередь пуста</div>';
   const ev=d.events||[];
   document.getElementById('events').innerHTML=ev.length?ev.map(e=>'<div class="event">'+esc(e.kind)+'<div class="muted">'+esc(e.ts)+' · '+esc(JSON.stringify(e.payload||{}))+'</div></div>').join(''):'<div class="muted">Событий нет</div>';
 }

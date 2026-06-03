@@ -633,14 +633,16 @@ def mark_reply(reply_id: str, status: str, error: str | None = None,
 
 def reply_queue_status(limit: int = 50) -> dict:
     rows = _read_json(REPLY_QUEUE, [])
-    counts = {}
-    for r in rows:
-        counts[r.get("status", "?")] = counts.get(r.get("status", "?"), 0) + 1
+    pending = [r for r in rows if r.get("status") == "pending"]
+    sent = [r for r in rows if r.get("status") == "sent"]
+    failed = [r for r in rows if r.get("status") == "failed"]
     return {
-        "counts": counts,
-        "pending": [r for r in rows if r.get("status") == "pending"][:limit],
-        "recent_sent": [r for r in rows if r.get("status") == "sent"][-limit:],
-        "failed": [r for r in rows if r.get("status") == "failed"][-limit:],
+        "pending": len(pending),
+        "sent": len(sent),
+        "failed": len(failed),
+        "items_pending": pending[:limit],
+        "recent_sent": sent[-limit:],
+        "items_failed": failed[-limit:],
     }
 
 
