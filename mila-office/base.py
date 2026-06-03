@@ -54,7 +54,7 @@ ANTHROPIC_BASE_URL   = os.getenv("ANTHROPIC_BASE_URL")  # напр. URL gateway/
 # поведение; бамп до Opus 4.8 = поменять переменную окружения, без правок кода.
 MODEL         = os.getenv("MILA_MODEL", "claude-opus-4-6")
 GEMINI_MODEL  = os.getenv("MILA_GEMINI_MODEL", "gemini-2.5-flash")
-MAX_TOKENS    = int(os.getenv("MILA_MAX_TOKENS", "2048"))
+MAX_TOKENS    = int(os.getenv("MILA_MAX_TOKENS", "4096"))
 LLM_PROVIDER  = (os.getenv("MILA_LLM_PROVIDER") or "gemini").lower()
 ANTHROPIC_AGENT_KEYS = {
     k.strip().lower()
