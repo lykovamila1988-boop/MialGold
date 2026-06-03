@@ -1,4 +1,5 @@
 import importlib
+import io
 import sys
 
 
@@ -94,3 +95,41 @@ def test_operator_page_and_actions(monkeypatch, tmp_path):
     )
     assert response.status_code == 200
     assert response.get_json()["task"]["status"] == "pending"
+
+
+def test_docx_upload_is_added_to_chat_prompt(monkeypatch, tmp_path):
+    appmod = _fresh_webapp(monkeypatch, tmp_path)
+    seen = {}
+
+    def responder(msg, hist):
+        seen["msg"] = msg
+        return "ok", hist
+
+    appmod.AGENTS["marina"]["responder"] = responder
+    client, csrf = _client_with_csrf(appmod)
+
+    from docx import Document
+
+    doc = Document()
+    doc.add_paragraph("DOCX feedback source text")
+    buf = io.BytesIO()
+    doc.save(buf)
+    buf.seek(0)
+
+    uploaded = client.post(
+        "/api/upload",
+        data={"file": (buf, "draft.docx")},
+        headers={"X-CSRF-Token": csrf},
+        content_type="multipart/form-data",
+    )
+    assert uploaded.status_code == 200
+    upload_id = uploaded.get_json()["upload_id"]
+
+    created = client.post(
+        "/api/chat",
+        json={"agent": "marina", "message": "give feedback", "upload_id": upload_id},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert created.status_code == 202
+    assert "draft.docx" in seen["msg"]
+    assert "DOCX feedback source text" in seen["msg"]

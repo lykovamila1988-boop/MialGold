@@ -312,6 +312,28 @@ def _extract_pdf_text(raw: bytes) -> tuple[str, str]:
         return "", f"Не удалось прочитать PDF: {type(e).__name__}"
 
 
+def _extract_docx_text(raw: bytes) -> tuple[str, str]:
+    import io
+    try:
+        from docx import Document
+    except Exception:
+        return "", "DOCX uploaded, but python-docx is not installed. Install python-docx to read Word files."
+    try:
+        doc = Document(io.BytesIO(raw))
+        parts = [p.text.strip() for p in doc.paragraphs if p.text and p.text.strip()]
+        for table in doc.tables:
+            for row in table.rows:
+                cells = [cell.text.strip() for cell in row.cells if cell.text and cell.text.strip()]
+                if cells:
+                    parts.append(" | ".join(cells))
+        text = "\n".join(parts).strip()
+        if not text:
+            return "", "DOCX uploaded, but no text was found in the document."
+        return text, ""
+    except Exception as e:
+        return "", f"Could not read DOCX: {type(e).__name__}"
+
+
 def _describe_image_with_gemini(raw: bytes, mime: str) -> tuple[str, str]:
     if not getattr(base, "GEMINI_KEY", ""):
         return "", "Картинка загружена, но GEMINI_KEY не настроен, поэтому я не могу увидеть изображение."
@@ -344,6 +366,8 @@ def _extract_upload(filename: str, raw: bytes, mime: str) -> tuple[str, str]:
         return _decode_text_file(raw), ""
     if suffix == ".pdf" or mime == "application/pdf":
         return _extract_pdf_text(raw)
+    if suffix == ".docx" or mime == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+        return _extract_docx_text(raw)
     if mime.startswith("image/") or suffix in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}:
         return _describe_image_with_gemini(raw, mime or "image/png")
     return "", "Поддерживаются текстовые файлы, PDF и изображения."
@@ -1197,6 +1221,11 @@ INDEX_HTML = r"""<!DOCTYPE html>
   .bubble b{font-weight:bold}.bubble i{font-style:italic}
   .bubble code{background:rgba(0,0,0,.06);padding:1px 5px;border-radius:4px;font-family:monospace;font-size:13px}
   .row.me .bubble code{background:rgba(255,255,255,.2)}
+  .next-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+  .next-actions button{border:1px solid var(--b);background:var(--w);color:var(--n);border-radius:20px;padding:7px 12px;font-size:12px;font-family:inherit;cursor:pointer;white-space:nowrap;transition:.15s}
+  .next-actions button:hover{border-color:var(--t);color:var(--t);background:rgba(196,97,74,.08)}
+  .next-actions button:first-child{background:var(--t);color:#fff;border-color:var(--t);font-weight:bold}
+  .next-actions button:first-child:hover{background:#A84026;border-color:#A84026}
   .typing{font-size:13px;color:var(--u);font-style:italic;padding:0 22px 8px}
   footer{border-top:1px solid var(--b);background:var(--c);padding:16px 22px}
   .inbar{display:flex;gap:12px;align-items:flex-end;max-width:1000px;margin:0 auto}
@@ -1223,7 +1252,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
     <div class="typing" id="typing" style="display:none"></div>
     <footer>
       <div class="inbar">
-        <input id="fileInp" type="file" accept=".txt,.md,.csv,.json,.pdf,image/*" style="display:none">
+        <input id="fileInp" type="file" accept=".txt,.md,.csv,.json,.docx,.pdf,image/*" style="display:none">
         <button id="fileBtn" title="Прикрепить файл">📎</button>
         <div id="fileName"></div>
         <textarea id="inp" rows="1" placeholder="Напиши сообщение…"></textarea>
@@ -1260,27 +1289,130 @@ function md(s){
 }
 function agent(){return AGENTS.find(a=>a.key===cur);}
 
+const NEXT_ACTIONS={
+  victoria:[
+    {label:'Передать Рите',agent:'rita',prompt:'Возьми отзыв редактора и преврати его в конкретные правки структуры рабочей тетради: что переписать, что сократить, что добавить и какой порядок блоков сделать.'},
+    {label:'Упаковать с Мариной',agent:'marina',prompt:'На основе редакторского отзыва сформулируй упаковку продукта: кому нужна рабочая тетрадь, какую боль закрывает, 3-5 выгод и позиционирование.'},
+    {label:'План запуска',agent:'vasya',prompt:'Собери следующий план действий по рабочей тетради: кто что делает, сроки, порядок финализации и публикации.'}
+  ],
+  rita:[
+    {label:'Финальная редактура',agent:'victoria',prompt:'Проверь обновленную структуру рабочей тетради как финальный редактор: голос, ясность, CTA, лишнее и недостающее.'},
+    {label:'Оффер',agent:'lera',prompt:'Собери оффер для рабочей тетради: обещание, цена/ценность, кому подходит и почему купить сейчас.'},
+    {label:'Упаковка',agent:'marina',prompt:'Сформулируй публичную упаковку рабочей тетради для Instagram и описания продукта.'}
+  ],
+  marina:[
+    {label:'Продажный текст',agent:'lera',prompt:'На основе упаковки продукта напиши продающий текст для запуска рабочей тетради.'},
+    {label:'Контент-план',agent:'vasya',prompt:'Разложи запуск рабочей тетради в календарь: посты, сторис, напоминания и дедлайны.'},
+    {label:'Проверка продюсера',agent:'producer',prompt:'Оцени упаковку рабочей тетради как продюсер: место в линейке, цена, следующий продукт и риски.'}
+  ],
+  lera:[
+    {label:'Проверка Кирилла',agent:'producer',prompt:'Проверь оффер и продажный текст рабочей тетради: сила предложения, цена, путь к консультации или следующему продукту.'},
+    {label:'План публикаций',agent:'vasya',prompt:'Составь план публикаций и сторис для запуска по этому продажному тексту.'},
+    {label:'Редактура текста',agent:'victoria',prompt:'Отредактируй продажный текст: голос Людмилы, ясность, мягкость, CTA.'}
+  ],
+  producer:[
+    {label:'Поставить задачи',agent:'manager',prompt:'Разложи решение продюсера по рабочей тетради в задачи офиса: ответственный, следующий шаг, критерий готовности.'},
+    {label:'Календарь',agent:'vasya',prompt:'Поставь продюсерский план запуска рабочей тетради в календарь действий.'},
+    {label:'Финансы',agent:'dima',prompt:'Посчитай экономику рабочей тетради: цена, цель продаж, сценарии выручки, конверсия.'}
+  ],
+  manager:[
+    {label:'Назначить задачи',agent:'manager',prompt:'Сделай короткий task-list для офиса по этому проекту: агент, задача, вход, выход, дедлайн.'},
+    {label:'Календарь',agent:'vasya',prompt:'Преврати этот task-list в календарь выполнения.'},
+    {label:'Продолжить с Мариной',agent:'marina',prompt:'Возьми план офиса и подготовь следующий маркетинговый шаг.'}
+  ],
+  vasya:[
+    {label:'Развернуть в задачи',agent:'manager',prompt:'Разложи этот план в задачи для офиса: кто, что, когда, критерий готовности.'},
+    {label:'Согласовать с продюсером',agent:'producer',prompt:'Проверь этот календарь как продюсер: реалистичность, приоритеты, зависимости, риски.'},
+    {label:'Опубликовать в Telegram',agent:'tyoma',prompt:'Анонсируй этот план запуска в Telegram для команды и Людмилы.'}
+  ],
+  dima:[
+    {label:'Одобрить план',agent:'producer',prompt:'На основе финансовых расчётов помоги принять решение: стоит ли идти в этот проект, цена правильная, риски.'},
+    {label:'Задачи по монетизации',agent:'manager',prompt:'Преврати финансовый план в конкретные задачи офиса: цена, условия, система продаж.'},
+    {label:'Отчёт для Людмилы',agent:'marina',prompt:'Подготовь финансовый отчёт для Людмилы: инвестиции, цель прибыли, сценарии.'}
+  ],
+  tyoma:[
+    {label:'Проверить тон',agent:'victoria',prompt:'Отредактируй сообщение для Telegram: голос Людмилы, ясность, CTA.'},
+    {label:'Расширить текст',agent:'marina',prompt:'Расширь это сообщение для Telegram: добавь контекст, эмоцию, привлекательность.'},
+    {label:'Согласовать с планом',agent:'vasya',prompt:'Проверь, соответствует ли объявление в Telegram календарному плану и срокам.'}
+  ],
+  olya:[
+    {label:'Контент по тренду',agent:'marina',prompt:'Создай контент по этому тренду: формат, позиционирование, как вписать Людмилу и её услуги.'},
+    {label:'Регулярный пост',agent:'marina',prompt:'Превратить этот тренд в регулярный контент для Instagram: серия постов, карусель или Reels.'},
+    {label:'Добавить в план',agent:'vasya',prompt:'Запланируй контент по этому тренду в календарь и установи сроки публикации.'}
+  ],
+  alina:[
+    {label:'Встреча со своим стилем',agent:'marina',prompt:'Подготовь контент для лида, который интересуется услугами Людмилы: позиционирование, путь к консультации.'},
+    {label:'Письмо льду',agent:'lera',prompt:'Напиши письмо потенциальному клиенту на основе данных контакта: персонализация, оффер, CTA.'},
+    {label:'Follow-up в Telegram',agent:'tyoma',prompt:'Составь follow-up сообщение для лида в Telegram с предложением консультации.'}
+  ],
+  default:[
+    {label:'Что дальше',agent:'manager',prompt:'Определи следующий лучший шаг офиса по этому результату: кто должен продолжить, что сделать и какой результат получить.'},
+    {label:'План действий',agent:'vasya',prompt:'Составь конкретный план следующих действий по этому результату.'}
+  ]
+};
+
+function nextActionsFor(agentKey){
+  return (NEXT_ACTIONS[agentKey]||NEXT_ACTIONS.default).slice(0,3);
+}
+
 // UI-переписка по агенту: {agentKey: [{text, me}, ...]}. Бэкенд хранит свою
 // историю (для контекста модели), а это — то, что видно на экране. Переключение
 // агентов больше НЕ стирает переписку: для каждого реплеим её из этого стора.
 const TRANSCRIPTS = {};
 
 // Рисует один пузырь в DOM (без записи в стор).
-function drawMsg(text, me){
+function drawMsg(text, me, actions){
   const chat=document.getElementById('chat');
   const a=agent();
   const row=document.createElement('div'); row.className='row'+(me?' me':'');
   const av=document.createElement('div'); av.className='av';
   av.style.background=me?'#7A5E54':a.color; av.textContent=me?'Я':a.emoji;
-  const b=document.createElement('div'); b.className='bubble'; b.innerHTML=md(text);
+
+  // Убираем [→ agent] подсказку из видимого текста, но парсим её для выделения.
+  let displayText=text;
+  let recommendedAgent=null;
+  const recommended=text.match(/\[→\s*(\w+)\]$/);
+  if(recommended){
+    recommendedAgent=recommended[1];
+    displayText=text.replace(/\s*\[→\s*\w+\]\s*$/, '');
+  }
+
+  const b=document.createElement('div'); b.className='bubble'; b.innerHTML=md(displayText);
+  if(!me && actions && actions.length){
+    const wrap=document.createElement('div'); wrap.className='next-actions';
+    actions.forEach((act)=>{
+      const btn=document.createElement('button'); btn.type='button'; btn.textContent=act.label;
+      // Если агент предложил [→ rita] и есть действие с agent='rita', выделяем его специально.
+      if(recommendedAgent && act.agent===recommendedAgent) {
+        btn.style.outline='2px solid var(--t)'; btn.style.outlineOffset='2px';
+      }
+      btn.onclick=()=>runNextAction(act, displayText);
+      wrap.appendChild(btn);
+    });
+    b.appendChild(wrap);
+  }
   row.appendChild(av); row.appendChild(b); chat.appendChild(row);
   chat.scrollTop=chat.scrollHeight;
 }
 
 // Добавляет сообщение и в стор текущего агента, и на экран.
-function addMsg(text, me){
-  (TRANSCRIPTS[cur] = TRANSCRIPTS[cur] || []).push({text, me});
-  drawMsg(text, me);
+// Очищает [→ agent] подсказку перед сохранением.
+function addMsg(text, me, actions){
+  const savedActions=actions||[];
+  const cleanText=text.replace(/\s*\[→\s*\w+\]\s*$/, '');
+  (TRANSCRIPTS[cur] = TRANSCRIPTS[cur] || []).push({text:cleanText, me, actions:savedActions});
+  drawMsg(text, me, savedActions);
+}
+
+function runNextAction(action, context){
+  if(activeJob) return;
+  if(action.agent && action.agent!==cur) switchAgent(action.agent);
+  const inp=document.getElementById('inp');
+  inp.value=action.prompt+'\n\nКонтекст предыдущего шага:\n'+context;
+  inp.style.height='auto';
+  inp.style.height=Math.min(inp.scrollHeight,160)+'px';
+  inp.focus();
+  send();
 }
 
 function renderAgent(){
@@ -1298,7 +1430,7 @@ function renderAgent(){
   document.querySelectorAll('.apill').forEach(p=>p.classList.toggle('active',p.dataset.k===cur));
   const chat=document.getElementById('chat'); chat.innerHTML='';
   const hist=TRANSCRIPTS[cur];
-  if(hist && hist.length){ hist.forEach(m=>drawMsg(m.text, m.me)); }   // реплей сохранённой переписки
+  if(hist && hist.length){ hist.forEach(m=>drawMsg(m.text, m.me, m.actions)); }   // реплей сохранённой переписки
   else { drawMsg(a.intro,false); }                                     // первый визит — только intro
 }
 
@@ -1307,7 +1439,7 @@ function switchAgent(k){ cur=k; renderAgent(); }
 async function uploadSelectedFile(file){
   if(!file) return;
   const label=document.getElementById('fileName');
-  label.textContent='Загружаю: '+file.name;
+  label.textContent='Файл загружается';
   const fd=new FormData(); fd.append('file', file);
   let r=await fetch('/api/upload',{method:'POST',headers:{'X-CSRF-Token':CSRF},body:fd});
   if(r.status===403){
@@ -1321,7 +1453,19 @@ async function uploadSelectedFile(file){
     return;
   }
   pendingUpload=d;
-  label.textContent='Файл: '+d.name;
+  label.textContent='Файл прикреплен';
+}
+
+async function handlePaste(e){
+  const items=(e.clipboardData&&e.clipboardData.items)?Array.from(e.clipboardData.items):[];
+  const img=items.find(it=>it.kind==='file' && it.type && it.type.startsWith('image/'));
+  if(!img) return;
+  const blob=img.getAsFile();
+  if(!blob) return;
+  e.preventDefault();
+  const ext=(blob.type.split('/')[1]||'png').replace('jpeg','jpg').split(';')[0];
+  const file=new File([blob], 'screenshot-'+new Date().toISOString().replace(/[:.]/g,'-')+'.'+ext, {type:blob.type||'image/png'});
+  await uploadSelectedFile(file);
 }
 
 async function send(){
@@ -1331,7 +1475,7 @@ async function send(){
   const upload=pendingUpload;
   const shown=text || 'Дай фидбек по файлу';
   inp.value=''; inp.style.height='auto';
-  addMsg(upload ? (shown+'\n\n📎 '+upload.name) : shown,true);
+  addMsg(upload ? (shown+'\n\nПрикреплен файл') : shown,true);
   const t=document.getElementById('typing'); t.textContent=agent().name+' печатает…'; t.style.display='block';
   document.getElementById('send').disabled=true;
   try{
@@ -1360,7 +1504,7 @@ async function send(){
       activeJob=null;
       if(!d || d.status==='pending') { addMsg('Ответ ещё готовится. Обнови страницу или попробуй ещё раз через пару минут.',false); return; }
       if(d.error) addMsg('⚠️ Ошибка: '+d.error,false);
-      else addMsg(d.reply,false);
+      else addMsg(d.reply,false,nextActionsFor(cur));
     }
   }catch(e){ addMsg('⚠️ Сеть недоступна: '+e,false); }
   t.style.display='none'; document.getElementById('send').disabled=false; inp.focus();
@@ -1430,6 +1574,7 @@ window.onload=async()=>{
   fileInp.addEventListener('change',()=>uploadSelectedFile(fileInp.files[0]));
   inp.addEventListener('keydown',e=>{ if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();} });
   inp.addEventListener('input',()=>{ inp.style.height='auto'; inp.style.height=Math.min(inp.scrollHeight,160)+'px'; });
+  inp.addEventListener('paste',handlePaste);
   document.getElementById('send').onclick=send;
   document.getElementById('resetBtn').onclick=resetChat;
   document.getElementById('resetSessBtn').onclick=resetSession;
