@@ -628,17 +628,31 @@ def api_test(service):
     service = (service or "").lower()
     try:
         if service == "instagram":
+            # .env могли только что обновить (новый токен/flow/IDs) — перечитываем,
+            # чтобы тест отражал актуальные значения, а не загруженные при старте.
+            from dotenv import load_dotenv
+            load_dotenv(base.MILA_FOLDER / "tools" / ".env", override=True)
+            load_dotenv(base.MILA_FOLDER / ".env", override=True)
             token = _current_ig_token()
             if not token:
                 return jsonify({"ok": False, "error": "Токен Instagram не задан"}), 400
-            r = requests.get("https://graph.instagram.com/v21.0/me",
-                             params={"fields": "user_id,username", "access_token": token}, timeout=10)
+            # Facebook-токен (EAA…) ходит через graph.facebook.com + node=IG_USER_ID;
+            # instagram_login-токен — через graph.instagram.com + node=me. Берём по flow.
+            flow = (os.getenv("IG_API_FLOW", "facebook") or "facebook").strip().lower()
+            ver = os.getenv("GRAPH_API_VERSION", "v21.0")
+            if flow == "instagram_login":
+                host, node = "https://graph.instagram.com", "me"
+            else:
+                host, node = "https://graph.facebook.com", (os.getenv("IG_USER_ID") or "").strip() or "me"
+            r = requests.get(f"{host}/{ver}/{node}",
+                             params={"fields": "id,username,name", "access_token": token}, timeout=10)
             info = r.json()
             if "error" in info:
-                return jsonify({"ok": False, "error": info["error"].get("message", "невалидный токен")}), 400
-            return jsonify({"ok": True, "username": info.get("username"),
-                            "user_id": str(info.get("user_id") or info.get("id") or ""),
-                            "detail": "@" + (info.get("username") or "?")})
+                return jsonify({"ok": False, "error": info["error"].get("message", "невалидный токен"),
+                                "flow": flow}), 400
+            uname = info.get("username") or info.get("name")
+            return jsonify({"ok": True, "username": uname, "user_id": str(info.get("id") or ""),
+                            "flow": flow, "detail": ("@" + uname) if uname else ("id " + str(info.get("id") or "?"))})
         if service == "telegram":
             token = (getattr(base, "TELEGRAM_TOKEN", "") or "").strip()
             if not token:

@@ -37,6 +37,7 @@ TASK_QUEUE = MEM_DIR / "task_queue.json"
 APPROVALS = MEM_DIR / "approvals.json"
 RATE_LIMITS = MEM_DIR / "rate_limits.json"
 SUPERVISOR_STATUS = MEM_DIR / "supervisor_status.json"
+REPLY_QUEUE = MEM_DIR / "reply_queue.json"
 _LOCK = MEM_DIR / ".lock"
 ACTIVE_TASK_STATUSES = {"pending", "running"}
 
@@ -540,6 +541,107 @@ def unblock_task(task_id: str) -> dict:
 def list_tasks(status: str | None = None) -> list:
     rows = _read_json(TASK_QUEUE, [])
     return [r for r in rows if status is None or r.get("status") == status]
+
+
+# ─── REPLIES: очередь ответов на комментарии (paced, anti-spam) ──────────
+# Марина по команде «ответить всем» кладёт сюда черновики (по одному на коммент).
+# Отдельный paced-отправитель (reply_sender.py) шлёт их ПО ОДНОМУ с паузой и под
+# общим часовым лимитом (shared_rate_limit), чтобы всплеск ответов не выглядел
+# спамом для Instagram. Дедуп по comment_id — на один комментарий один ответ.
+REPLY_ACTIVE_STATUSES = {"pending", "sending"}
+
+
+def enqueue_reply(comment_id: str, message: str, post_id: str = "",
+                  username: str = "", comment_text: str = "") -> dict:
+    """Поставить ответ на комментарий в очередь. Дедуп по comment_id."""
+    comment_id = str(comment_id or "").strip()
+    message = (message or "").strip()
+    if not comment_id or not message:
+        return {"ok": False, "error": "comment_id and message are required"}
+    with _FileLock():
+        rows = _read_json(REPLY_QUEUE, [])
+        for r in rows:  # не отвечаем дважды на один и тот же комментарий
+            if r.get("comment_id") == comment_id and r.get("status") in (REPLY_ACTIVE_STATUSES | {"sent"}):
+                out = dict(r)
+                out["deduped"] = True
+                log_event("reply:deduped", {"comment_id": comment_id, "id": r.get("id")})
+                return out
+        rec = {
+            "id": f"r{max([int(str(x.get('id', 'r0')).lstrip('r') or 0) for x in rows], default=0) + 1}",
+            "comment_id": comment_id,
+            "message": message[:1000],
+            "post_id": post_id or None,
+            "username": username or None,
+            "comment_text": (comment_text or "")[:200],
+            "status": "pending",
+            "attempts": 0,
+            "deduped": False,
+            "created_at": _now(),
+            "sent_at": None,
+            "error": None,
+        }
+        rows.append(rec)
+        _write_json(REPLY_QUEUE, rows)
+    log_event("reply:queued", {"id": rec["id"], "comment_id": comment_id, "username": username})
+    return rec
+
+
+def list_replies(status: str | None = None) -> list:
+    rows = _read_json(REPLY_QUEUE, [])
+    return [r for r in rows if status is None or r.get("status") == status]
+
+
+def dequeue_reply(worker_id: str | None = None) -> dict | None:
+    """Взять один pending-ответ (FIFO) и пометить sending."""
+    worker_id = worker_id or default_worker_id()
+    with _FileLock():
+        rows = _read_json(REPLY_QUEUE, [])
+        pending = [r for r in rows if r.get("status") == "pending"]
+        if not pending:
+            return None
+        selected = sorted(pending, key=lambda r: r.get("created_at", ""))[0]
+        for r in rows:
+            if r.get("id") == selected.get("id"):
+                r["status"] = "sending"
+                r["worker_id"] = worker_id
+                r["started_at"] = _now()
+                r["attempts"] = int(r.get("attempts", 0) or 0) + 1
+                selected = r
+                break
+        _write_json(REPLY_QUEUE, rows)
+    return selected
+
+
+def mark_reply(reply_id: str, status: str, error: str | None = None,
+               response_id: str | None = None) -> dict:
+    with _FileLock():
+        rows = _read_json(REPLY_QUEUE, [])
+        for r in rows:
+            if r.get("id") == reply_id:
+                r["status"] = status
+                if status == "sent":
+                    r["sent_at"] = _now()
+                if error is not None:
+                    r["error"] = str(error)[:300]
+                if response_id is not None:
+                    r["response_id"] = response_id
+                _write_json(REPLY_QUEUE, rows)
+                log_event(f"reply:{status}", {"id": reply_id, "comment_id": r.get("comment_id")})
+                return r
+    return {"ok": False, "error": "reply not found", "id": reply_id}
+
+
+def reply_queue_status(limit: int = 50) -> dict:
+    rows = _read_json(REPLY_QUEUE, [])
+    counts = {}
+    for r in rows:
+        counts[r.get("status", "?")] = counts.get(r.get("status", "?"), 0) + 1
+    return {
+        "counts": counts,
+        "pending": [r for r in rows if r.get("status") == "pending"][:limit],
+        "recent_sent": [r for r in rows if r.get("status") == "sent"][-limit:],
+        "failed": [r for r in rows if r.get("status") == "failed"][-limit:],
+    }
 
 
 def write_supervisor_status(status: dict) -> dict:

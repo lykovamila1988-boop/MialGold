@@ -13,6 +13,7 @@ from rich.prompt import Prompt
 
 # Общая инфраструктура (env, пути, ключи, safe-path, allowlist, граф-клиент) — в base.
 import base
+import memory  # очередь ответов на комментарии (paced sender шлёт их по одному)
 
 # ─── SETUP ───────────────────────────────────────────────
 # Конфиг (.env, пути, ключи, Instagram-резолв) уже загружен в base при импорте —
@@ -44,6 +45,9 @@ SYSTEM_PROMPT = """Ты — Марина, маркетолог и стратег
 У тебя есть доступ к файлам в папке MILA GOLD и Instagram API.
 Используй инструменты проактивно — не жди когда попросят.
 При запросе контента — сразу пиши финальный текст, не шаблоны.
+Команда «ответить всем» (на комментарии): вызови instagram_get_comments (там id каждого
+комментария), составь живой персональный ответ на каждый в голосе Людмилы, затем передай
+их списком в queue_comment_replies. Не публикуй пачкой — очередь отправит по одному с паузой.
 """
 
 # ─── TOOLS DEFINITION ────────────────────────────────────
@@ -110,6 +114,36 @@ TOOLS = [
             "properties": {
                 "posts_limit": {"type": "integer", "default": 5, "description": "How many recent posts to check"}
             }
+        }
+    },
+    {
+        "name": "queue_comment_replies",
+        "description": (
+            "Поставить ОТВЕТЫ на комментарии в очередь отправки. Используй для команды "
+            "«ответить всем»: сначала вызови instagram_get_comments (там есть id каждого "
+            "комментария), составь персональный ответ на каждый, затем передай их сюда списком. "
+            "Ответы НЕ публикуются мгновенно — отдельный отправитель шлёт их ПО ОДНОМУ с паузой, "
+            "чтобы Instagram не счёл это спамом. На один комментарий — один ответ (дубли отсеются)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "replies": {
+                    "type": "array",
+                    "description": "Список ответов на комментарии",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "comment_id": {"type": "string", "description": "id комментария из instagram_get_comments"},
+                            "message": {"type": "string", "description": "текст ответа в голосе Людмилы"},
+                            "username": {"type": "string", "description": "ник автора комментария (опц.)"},
+                            "post_id": {"type": "string", "description": "id поста (опц.)"}
+                        },
+                        "required": ["comment_id", "message"]
+                    }
+                }
+            },
+            "required": ["replies"]
         }
     },
     {
@@ -258,6 +292,8 @@ def tool_instagram_get_comments(posts_limit: int = 5) -> str:
                 "fields": "id,text,username,timestamp"})
             for c in cr.get("data", []):
                 all_comments.append({
+                    "id": c.get("id"),            # нужен, чтобы ответить именно на этот коммент
+                    "post_id": post.get("id"),
                     "username": c.get("username"),
                     "text": c.get("text"),
                     "time": c.get("timestamp", "")[:10],
@@ -310,6 +346,40 @@ def tool_instagram_get_dms(limit: int = 10) -> str:
     except base.graph_api.GraphError as e:
         return f"API ошибка (нужен Instagram Professional API): {e}"
 
+def tool_queue_comment_replies(replies: list) -> str:
+    """Кладёт ответы на комментарии в очередь (memory.enqueue_reply). Реальную
+    отправку делает paced-отправитель (reply_sender.py) — по одному, с паузой."""
+    if not isinstance(replies, list) or not replies:
+        return "Пустой список ответов — нечего ставить в очередь."
+    queued, deduped, bad = [], 0, 0
+    for r in replies:
+        if not isinstance(r, dict):
+            bad += 1
+            continue
+        rec = memory.enqueue_reply(
+            comment_id=r.get("comment_id", ""),
+            message=r.get("message", ""),
+            post_id=r.get("post_id", ""),
+            username=r.get("username", ""),
+            comment_text=r.get("comment_text", ""),
+        )
+        if rec.get("ok") is False:
+            bad += 1
+        elif rec.get("deduped"):
+            deduped += 1
+        else:
+            queued.append(rec.get("id"))
+    st = memory.reply_queue_status()
+    pending = st["counts"].get("pending", 0)
+    return (
+        f"В очередь поставлено {len(queued)} ответ(ов)"
+        + (f", пропущено дублей: {deduped}" if deduped else "")
+        + (f", некорректных: {bad}" if bad else "")
+        + f". Всего ждёт отправки: {pending}. "
+        "Отправитель пошлёт их по одному с паузой (запусти reply_sender.py, если ещё не запущен)."
+    )
+
+
 def tool_run_command(command: str) -> str:
     # Делегируем в base.run_command: только allowlist (python tools/<script>.py …),
     # без shell=True. Раньше здесь выполнялась произвольная shell-строка.
@@ -325,6 +395,7 @@ def run_tool(name: str, inputs: dict) -> str:
         "instagram_get_analytics":    lambda: tool_instagram_get_analytics(inputs.get("period","week")),
         "instagram_get_posts":        lambda: tool_instagram_get_posts(inputs.get("limit",10)),
         "instagram_get_comments":     lambda: tool_instagram_get_comments(inputs.get("posts_limit",5)),
+        "queue_comment_replies":      lambda: tool_queue_comment_replies(inputs.get("replies", [])),
         "instagram_publish_post":     lambda: tool_instagram_publish_post(inputs["image_url"], inputs["caption"]),
         "instagram_get_dms":          lambda: tool_instagram_get_dms(inputs.get("limit",10)),
         "run_command":                lambda: tool_run_command(inputs["command"]),
