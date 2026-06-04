@@ -1377,6 +1377,50 @@ def api_document_export(doc_id: str):
     return response
 
 
+@app.post("/api/agent-message")
+def api_agent_message():
+    """Сохранить сообщение от пользователя или агента в историю."""
+    data = request.get_json() or {}
+    agent = data.get("agent")
+    text = data.get("text", "")
+    is_user = data.get("is_user", False)
+    verdict = data.get("verdict")
+
+    if not agent or not text:
+        return jsonify({"ok": False, "error": "Missing agent or text"}), 400
+
+    result = memory.save_agent_message(agent, text, is_user, verdict)
+    return jsonify(result)
+
+
+@app.get("/api/agent-history/<agent>")
+def api_get_agent_history(agent: str):
+    """Получить историю переписки с агентом."""
+    result = memory.get_agent_history(agent)
+    return jsonify(result)
+
+
+@app.get("/api/agent-histories")
+def api_list_agent_histories():
+    """Список всех историй с информацией о количестве сообщений."""
+    histories = memory.list_agent_histories()
+    return jsonify({"ok": True, "histories": histories})
+
+
+@app.post("/api/agent-history/<agent>/clear")
+def api_clear_agent_history(agent: str):
+    """Очистить историю конкретного агента."""
+    result = memory.clear_agent_history(agent)
+    return jsonify(result)
+
+
+@app.post("/api/agent-histories/clear-all")
+def api_clear_all_histories():
+    """Очистить все истории."""
+    result = memory.clear_all_histories()
+    return jsonify(result)
+
+
 @app.get("/favicon.ico")
 def favicon():
     # Браузер всегда просит /favicon.ico — без маршрута это 404 в консоли.
@@ -1695,7 +1739,15 @@ function addMsg(text, me, actions, verdict){
   const cleanText=text.replace(/\s*\[→\s*\w+\]\s*$/, '');
   (TRANSCRIPTS[cur] = TRANSCRIPTS[cur] || []).push({text:cleanText, me, actions:savedActions, verdict});
   drawMsg(text, me, savedActions, verdict);
-  saveSessionToStorage();  // Сохраняем в localStorage после каждого сообщения
+  saveSessionToStorage();  // Сохраняем в localStorage
+
+  // Сохраняем сообщение на сервер в истории агента
+  postJSON('/api/agent-message',{
+    agent:cur,
+    text:cleanText,
+    is_user:me,
+    verdict:verdict||null
+  }).catch(e=>console.warn('Could not save to server history:',e));
 }
 
 async function runNextAction(action, context){
@@ -1714,7 +1766,7 @@ async function runNextAction(action, context){
   send();
 }
 
-function renderAgent(){
+async function renderAgent(){
   const a=agent();
   document.getElementById('hname').textContent=a.name+' — '+a.role;
   const hav=document.getElementById('hav'); hav.textContent=a.emoji; hav.style.background=a.color;
@@ -1728,12 +1780,39 @@ function renderAgent(){
   });
   document.querySelectorAll('.apill').forEach(p=>p.classList.toggle('active',p.dataset.k===cur));
   const chat=document.getElementById('chat'); chat.innerHTML='';
-  const hist=TRANSCRIPTS[cur];
-  if(hist && hist.length){ hist.forEach(m=>drawMsg(m.text, m.me, m.actions, m.verdict)); }   // реплей сохранённой переписки
-  else { drawMsg(a.intro,false); }                                     // первый визит — только intro
+
+  // Проверяем есть ли история на сервере
+  let hist=TRANSCRIPTS[cur];
+  if(!hist || !hist.length){
+    try{
+      const resp=await fetch('/api/agent-history/'+encodeURIComponent(cur));
+      if(resp.ok){
+        const data=await resp.json();
+        if(data.ok && data.history && data.history.messages){
+          // Загружаем историю с сервера и заполняем TRANSCRIPTS
+          const serverMsgs=data.history.messages.map(m=>({
+            text:m.text,
+            me:m.role==='user',
+            actions:[],
+            verdict:m.verdict
+          }));
+          TRANSCRIPTS[cur]=serverMsgs;
+          hist=serverMsgs;
+        }
+      }
+    }catch(e){
+      console.warn('Could not load server history:',e);
+    }
+  }
+
+  if(hist && hist.length){
+    hist.forEach(m=>drawMsg(m.text, m.me, m.actions, m.verdict));  // реплей переписки
+  }else{
+    drawMsg(a.intro,false);  // первый визит — только intro
+  }
 }
 
-function switchAgent(k){ cur=k; renderAgent(); saveSessionToStorage(); }
+async function switchAgent(k){ cur=k; await renderAgent(); saveSessionToStorage(); }
 
 async function uploadSelectedFile(file){
   if(!file) return;
@@ -1818,15 +1897,34 @@ async function send(){
 }
 
 async function resetChat(){
-  // Чистит переписку ТОЛЬКО текущего агента (UI + бэкенд-история).
+  // Чистит переписку ТОЛЬКО текущего агента (UI + localStorage + server).
+  if(!confirm('Очистить чат с '+agent().name+'?')) return;
+
+  // Очищаем на сервере
+  try{
+    await postJSON('/api/agent-history/'+encodeURIComponent(cur)+'/clear',{});
+  }catch(e){
+    console.warn('Could not clear server history:',e);
+  }
+
+  // Очищаем UI
   await postJSON('/api/reset',{agent:cur});
   TRANSCRIPTS[cur]=[];
-  renderAgent();
+  await renderAgent();
 }
 
 async function resetSession(){
-  // Чистит переписку со ВСЕМИ агентами (UI + бэкенд-истории всех).
+  // Чистит переписку со ВСЕМИ агентами (UI + localStorage + server history).
   if(!confirm('Очистить переписку со всеми агентами?')) return;
+
+  // Очищаем на сервере (новые API)
+  try{
+    await postJSON('/api/agent-histories/clear-all',{});
+  }catch(e){
+    console.warn('Could not clear server history:',e);
+  }
+
+  // Очищаем UI и localStorage
   await postJSON('/api/reset',{all:true});
   for(const k in TRANSCRIPTS) delete TRANSCRIPTS[k];
   currentDocId=null;

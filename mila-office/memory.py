@@ -39,6 +39,7 @@ RATE_LIMITS = MEM_DIR / "rate_limits.json"
 SUPERVISOR_STATUS = MEM_DIR / "supervisor_status.json"
 REPLY_QUEUE = MEM_DIR / "reply_queue.json"
 DOC_WORKFLOWS = MEM_DIR / "doc_workflows.json"
+AGENT_HISTORIES = MEM_DIR / "agent_histories.json"
 _LOCK = MEM_DIR / ".lock"
 ACTIVE_TASK_STATUSES = {"pending", "running"}
 
@@ -1099,6 +1100,75 @@ def export_document(doc_id: str) -> dict:
 
     log_event(f"doc:exported", {"doc_id": doc_id})
     return {"ok": True, "export": export_data}
+
+
+# ─── Agent conversation history (persistent storage) ─────────────────
+def save_agent_message(agent: str, text: str, is_user: bool, verdict: str = None) -> dict:
+    """Сохранить сообщение от пользователя или агента в историю."""
+    histories = _read_json(AGENT_HISTORIES, {})
+
+    if agent not in histories:
+        histories[agent] = {
+            "agent": agent,
+            "created_at": _now(),
+            "messages": []
+        }
+
+    message = {
+        "role": "user" if is_user else "assistant",
+        "text": text,
+        "verdict": verdict,
+        "timestamp": _now(),
+    }
+
+    histories[agent]["messages"].append(message)
+
+    with _FileLock():
+        _write_json(AGENT_HISTORIES, histories)
+
+    return {"ok": True, "agent": agent, "msg_count": len(histories[agent]["messages"])}
+
+
+def get_agent_history(agent: str) -> dict:
+    """Получить полную историю переписки с агентом."""
+    histories = _read_json(AGENT_HISTORIES, {})
+    if agent not in histories:
+        return {"ok": True, "agent": agent, "messages": []}
+    return {"ok": True, "agent": agent, "history": histories[agent]}
+
+
+def list_agent_histories() -> list:
+    """Список всех историй переписок с агентами."""
+    histories = _read_json(AGENT_HISTORIES, {})
+    result = []
+    for agent, data in histories.items():
+        result.append({
+            "agent": agent,
+            "created_at": data.get("created_at"),
+            "message_count": len(data.get("messages", [])),
+            "last_message_at": data.get("messages", [{}])[-1].get("timestamp") if data.get("messages") else None,
+        })
+    return sorted(result, key=lambda x: x.get("last_message_at", ""), reverse=True)
+
+
+def clear_agent_history(agent: str) -> dict:
+    """Очистить историю переписки с конкретным агентом."""
+    histories = _read_json(AGENT_HISTORIES, {})
+    if agent in histories:
+        del histories[agent]
+        with _FileLock():
+            _write_json(AGENT_HISTORIES, histories)
+        log_event(f"agent:history:cleared", {"agent": agent})
+        return {"ok": True, "agent": agent}
+    return {"ok": False, "error": f"Agent {agent} not found"}
+
+
+def clear_all_histories() -> dict:
+    """Очистить все истории переписок."""
+    with _FileLock():
+        _write_json(AGENT_HISTORIES, {})
+    log_event(f"agent:histories:cleared_all", {})
+    return {"ok": True, "cleared": "all"}
 
 
 if __name__ == "__main__":
