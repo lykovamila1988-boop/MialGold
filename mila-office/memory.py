@@ -99,30 +99,41 @@ def _ensure():
 
 class _FileLock:
     """Простой межпроцессный замок через атомарное создание файла.
-    Достаточно для локального однопользовательского офиса."""
-    def __init__(self, path=_LOCK, timeout=10.0):
+    Достаточно для локального однопользовательского офиса.
+    Использует exponential backoff для уменьшения contention."""
+    def __init__(self, path=_LOCK, timeout=15.0):
         self.path, self.timeout, self.fd = path, timeout, None
 
     def __enter__(self):
         _ensure()
         start = time.time()
+        attempt = 0
         while True:
             try:
                 self.fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_RDWR)
                 return self
             except FileExistsError:
-                if time.time() - start > self.timeout:
+                elapsed = time.time() - start
+                if elapsed > self.timeout:
                     # Замок завис (упавший процесс) — забираем силой.
                     try:
                         self.path.unlink()
+                        continue
                     except OSError:
                         pass
+                    raise TimeoutError(f"Could not acquire lock after {self.timeout}s")
                 else:
-                    time.sleep(0.05)
+                    # Exponential backoff с jitter: 10ms → 20ms → 40ms (up to 200ms)
+                    delay = min(0.01 * (2 ** attempt) + (time.time() % 0.01), 0.2)
+                    time.sleep(delay)
+                    attempt += 1
 
     def __exit__(self, *exc):
         if self.fd is not None:
-            os.close(self.fd)
+            try:
+                os.close(self.fd)
+            except OSError:
+                pass
         try:
             self.path.unlink()
         except OSError:

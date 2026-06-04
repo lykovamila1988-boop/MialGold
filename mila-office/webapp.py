@@ -1381,16 +1381,31 @@ def api_document_export(doc_id: str):
 def api_agent_message():
     """Сохранить сообщение от пользователя или агента в историю."""
     data = request.get_json() or {}
-    agent = data.get("agent")
-    text = data.get("text", "")
+    agent = data.get("agent", "").strip()
+    text = data.get("text", "").strip()
     is_user = data.get("is_user", False)
     verdict = data.get("verdict")
 
-    if not agent or not text:
-        return jsonify({"ok": False, "error": "Missing agent or text"}), 400
+    # Validation
+    if not agent:
+        return jsonify({"ok": False, "error": "Missing agent"}), 400
+    if not text:
+        return jsonify({"ok": False, "error": "Empty message"}), 400
+    if len(text) > 50000:
+        return jsonify({"ok": False, "error": "Message too long (max 50000 chars)"}), 400
+    if len(agent) > 50 or not agent.replace("_", "").replace("-", "").isalnum():
+        return jsonify({"ok": False, "error": "Invalid agent name"}), 400
 
-    result = memory.save_agent_message(agent, text, is_user, verdict)
-    return jsonify(result)
+    # Validate verdict if provided
+    if verdict and verdict not in ("ready_next", "needs_revision", "done"):
+        return jsonify({"ok": False, "error": "Invalid verdict"}), 400
+
+    try:
+        result = memory.save_agent_message(agent, text, is_user, verdict)
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"Error saving agent message: {e}", exc_info=True)
+        return jsonify({"ok": False, "error": "Server error"}), 500
 
 
 @app.get("/api/agent-history/<agent>")
@@ -1580,7 +1595,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
     </div>
   </div>
 <script>
-let AGENTS=[], cur=null, CSRF='', activeJob=null, pendingUpload=null, currentDocId=null;
+let AGENTS=[], cur=null, CSRF='', activeJob=null, pendingUpload=null, currentDocId=null, activeLoadAgent=null;
 
 async function postJSON(url, payload){
   const body=JSON.stringify(payload||{});
@@ -1737,17 +1752,50 @@ function drawMsg(text, me, actions, verdict){
 function addMsg(text, me, actions, verdict){
   const savedActions=actions||[];
   const cleanText=text.replace(/\s*\[→\s*\w+\]\s*$/, '');
+
+  // Валидация
+  if (!cleanText || !cur) {
+    console.warn('Invalid message or agent');
+    return;
+  }
+
   (TRANSCRIPTS[cur] = TRANSCRIPTS[cur] || []).push({text:cleanText, me, actions:savedActions, verdict});
   drawMsg(text, me, savedActions, verdict);
   saveSessionToStorage();  // Сохраняем в localStorage
 
-  // Сохраняем сообщение на сервер в истории агента
-  postJSON('/api/agent-message',{
-    agent:cur,
-    text:cleanText,
-    is_user:me,
-    verdict:verdict||null
-  }).catch(e=>console.warn('Could not save to server history:',e));
+  // Сохраняем сообщение на сервер в истории агента (с retry logic)
+  saveToServerWithRetry(cur, cleanText, me, verdict);
+}
+
+// Helper: retry logic для сохранения на сервер
+async function saveToServerWithRetry(agent, text, isUser, verdict, attempt = 1) {
+  const maxAttempts = 3;
+  const delayMs = 1000 * attempt;  // exponential backoff: 1s, 2s, 4s
+
+  try {
+    await postJSON('/api/agent-message', {
+      agent: agent,
+      text: text,
+      is_user: isUser,
+      verdict: verdict || null
+    });
+    // Success - no action needed
+  } catch (e) {
+    if (attempt < maxAttempts) {
+      console.warn(`Save to server failed (attempt ${attempt}), retrying in ${delayMs}ms...`);
+      setTimeout(() => saveToServerWithRetry(agent, text, isUser, verdict, attempt + 1), delayMs);
+    } else {
+      console.error(`Could not save to server after ${maxAttempts} attempts:`, e);
+      // Message is still in localStorage, so it's not lost
+      // But warn user
+      const msg = document.createElement('div');
+      msg.style.cssText = 'position:fixed;bottom:80px;right:20px;background:#f6e1dc;color:#a8412c;' +
+        'padding:10px 14px;border-radius:6px;font-size:12px;z-index:50;max-width:300px';
+      msg.textContent = 'Не удалось сохранить на сервер (сообщение в памяти браузера)';
+      document.body.appendChild(msg);
+      setTimeout(() => msg.remove(), 5000);
+    }
+  }
 }
 
 async function runNextAction(action, context){
@@ -1767,48 +1815,66 @@ async function runNextAction(action, context){
 }
 
 async function renderAgent(){
-  const a=agent();
-  document.getElementById('hname').textContent=a.name+' — '+a.role;
-  const hav=document.getElementById('hav'); hav.textContent=a.emoji; hav.style.background=a.color;
-  document.getElementById('inp').placeholder='Спроси '+a.name+'…';
-  const ch=document.getElementById('chips'); ch.innerHTML='';
-  a.chips.forEach(c=>{
-    const el=document.createElement('button'); el.className='chip'; el.textContent=c.label;
-    el.title=c.prompt;  // подсказка при наведении — полный текст промпта
-    el.onclick=()=>{ document.getElementById('inp').value=c.prompt; send(); };
-    ch.appendChild(el);
-  });
-  document.querySelectorAll('.apill').forEach(p=>p.classList.toggle('active',p.dataset.k===cur));
-  const chat=document.getElementById('chat'); chat.innerHTML='';
-
-  // Проверяем есть ли история на сервере
-  let hist=TRANSCRIPTS[cur];
-  if(!hist || !hist.length){
-    try{
-      const resp=await fetch('/api/agent-history/'+encodeURIComponent(cur));
-      if(resp.ok){
-        const data=await resp.json();
-        if(data.ok && data.history && data.history.messages){
-          // Загружаем историю с сервера и заполняем TRANSCRIPTS
-          const serverMsgs=data.history.messages.map(m=>({
-            text:m.text,
-            me:m.role==='user',
-            actions:[],
-            verdict:m.verdict
-          }));
-          TRANSCRIPTS[cur]=serverMsgs;
-          hist=serverMsgs;
-        }
-      }
-    }catch(e){
-      console.warn('Could not load server history:',e);
-    }
+  // Prevent race conditions: don't load if another agent is already loading
+  if (activeLoadAgent && activeLoadAgent !== cur) {
+    console.warn('Render skipped: another agent is loading');
+    return;
   }
 
-  if(hist && hist.length){
-    hist.forEach(m=>drawMsg(m.text, m.me, m.actions, m.verdict));  // реплей переписки
-  }else{
-    drawMsg(a.intro,false);  // первый визит — только intro
+  activeLoadAgent = cur;
+
+  try {
+    const a = agent();
+    document.getElementById('hname').textContent = a.name + ' — ' + a.role;
+    const hav = document.getElementById('hav');
+    hav.textContent = a.emoji;
+    hav.style.background = a.color;
+    document.getElementById('inp').placeholder = 'Спроси ' + a.name + '…';
+    const ch = document.getElementById('chips');
+    ch.innerHTML = '';
+    a.chips.forEach(c => {
+      const el = document.createElement('button');
+      el.className = 'chip';
+      el.textContent = c.label;
+      el.title = c.prompt;
+      el.onclick = () => { document.getElementById('inp').value = c.prompt; send(); };
+      ch.appendChild(el);
+    });
+    document.querySelectorAll('.apill').forEach(p => p.classList.toggle('active', p.dataset.k === cur));
+    const chat = document.getElementById('chat');
+    chat.innerHTML = '';
+
+    // Проверяем есть ли история на сервере
+    let hist = TRANSCRIPTS[cur];
+    if (!hist || !hist.length) {
+      try {
+        const resp = await fetch('/api/agent-history/' + encodeURIComponent(cur));
+        if (resp.ok) {
+          const data = await resp.json();
+          if (data.ok && data.history && data.history.messages && data.history.messages.length > 0) {
+            // Загружаем историю с сервера и заполняем TRANSCRIPTS
+            const serverMsgs = data.history.messages.map(m => ({
+              text: m.text,
+              me: m.role === 'user',
+              actions: [],
+              verdict: m.verdict
+            }));
+            TRANSCRIPTS[cur] = serverMsgs;
+            hist = serverMsgs;
+          }
+        }
+      } catch (e) {
+        console.warn('Could not load server history:', e);
+      }
+    }
+
+    if (hist && hist.length) {
+      hist.forEach(m => drawMsg(m.text, m.me, m.actions, m.verdict));
+    } else {
+      drawMsg(a.intro, false);
+    }
+  } finally {
+    activeLoadAgent = null;
   }
 }
 
@@ -1938,11 +2004,39 @@ async function resetSession(){
 function saveSessionToStorage(){
   // Сохраняет TRANSCRIPTS и текущего агента в localStorage
   try{
-    localStorage.setItem('mila_transcripts', JSON.stringify(TRANSCRIPTS));
+    const json = JSON.stringify(TRANSCRIPTS);
+    // Проверяем примерный размер перед сохранением
+    if (json.length > 8000000) {  // ~8 МБ - близко к лимиту
+      console.warn('localStorage nearly full, clearing old messages');
+      // Очищаем самые старые сообщения из каждого агента
+      for (const agent in TRANSCRIPTS) {
+        if (TRANSCRIPTS[agent] && TRANSCRIPTS[agent].length > 100) {
+          TRANSCRIPTS[agent] = TRANSCRIPTS[agent].slice(-100);  // Keep last 100
+        }
+      }
+      saveSessionToStorage();  // Retry with trimmed data
+      return;
+    }
+    localStorage.setItem('mila_transcripts', json);
     if(cur) localStorage.setItem('mila_current_agent', cur);
     if(currentDocId) localStorage.setItem('mila_current_doc_id', currentDocId);
   }catch(e){
-    console.warn('Could not save to localStorage:', e);
+    if (e.name === 'QuotaExceededError') {
+      console.error('localStorage is full, clearing old messages');
+      // Emergency cleanup: keep only last 20 messages per agent
+      for (const agent in TRANSCRIPTS) {
+        if (TRANSCRIPTS[agent] && TRANSCRIPTS[agent].length > 20) {
+          TRANSCRIPTS[agent] = TRANSCRIPTS[agent].slice(-20);
+        }
+      }
+      try {
+        localStorage.setItem('mila_transcripts', JSON.stringify(TRANSCRIPTS));
+      } catch (e2) {
+        console.error('Still cannot save to localStorage:', e2);
+      }
+    } else {
+      console.warn('Could not save to localStorage:', e);
+    }
   }
 }
 
@@ -2653,37 +2747,57 @@ function toggleFeedbackBox(){
 async function sendFeedback(){
   const feedback=document.getElementById('feedbackText').value.trim();
   if(!feedback) { alert('Введи текст правок'); return; }
-  if(!currentViewingDocId) return;
+  if(!currentViewingDocId) { alert('Документ не выбран'); return; }
 
-  // Определяем агентов для обратной связи
-  // Берём последнего агента и отправляем правки обратно к нему
-  // (в реальном использовании нужно дать пользователю выбрать агентов)
-  const docResp=await fetch('/api/document/'+encodeURIComponent(currentViewingDocId));
-  const docData=await docResp.json();
-  const stages=docData.document.stages||[];
-  if(stages.length<1) { alert('Нет этапов для отправки правок'); return; }
-
-  const lastStage=stages[stages.length-1];
-  const fromAgent=lastStage.agent;
-  const prevStage=stages[stages.length-2];
-  const toAgent=prevStage?prevStage.agent:fromAgent;
+  if(feedback.length > 10000) {
+    alert('Текст правок слишком длинный (макс 10000 символов)');
+    return;
+  }
 
   try{
+    // Определяем агентов для обратной связи
+    const docResp=await fetch('/api/document/'+encodeURIComponent(currentViewingDocId));
+    if(!docResp.ok) throw new Error('Документ не найден');
+
+    const docData=await docResp.json();
+    if(!docData.ok) throw new Error(docData.error||'Ошибка загрузки документа');
+
+    const stages=docData.document.stages||[];
+    if(stages.length<1) {
+      alert('Нет этапов для отправки правок');
+      return;
+    }
+
+    // Validation: последний stage должен быть валидный
+    const lastStage=stages[stages.length-1];
+    if(!lastStage.agent) {
+      alert('Последний этап некорректен');
+      return;
+    }
+
+    const fromAgent=lastStage.agent;
+    const prevStage=stages.length>1?stages[stages.length-2]:null;
+    const toAgent=prevStage?prevStage.agent:fromAgent;
+
     const r=await postJSON('/api/document/'+encodeURIComponent(currentViewingDocId)+'/feedback',{
       from_agent:fromAgent,
       to_agent:toAgent,
       feedback:feedback
     });
-    if(!r.ok) throw new Error('Error sending feedback');
+    if(!r.ok) throw new Error('HTTP '+r.status);
+
     const res=await r.json();
     if(res.ok){
       alert('Правки отправлены!');
       toggleFeedbackBox();
       document.getElementById('feedbackText').value='';
       await openDocModal(currentViewingDocId);
-    }else throw new Error(res.error);
+    }else {
+      throw new Error(res.error||'Ошибка при отправке');
+    }
   }catch(e){
     alert('Ошибка: '+e.message);
+    console.error('sendFeedback error:', e);
   }
 }
 
