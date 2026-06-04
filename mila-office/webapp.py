@@ -450,6 +450,14 @@ def _run_job(job_id, sid, key, msg, attachment=None):
             histories = _session_histories(sid)
             reply, new_hist = AGENTS[key]["responder"](msg, histories[key])
             histories[key] = _trim(new_hist)
+        # Парсим VERDICT и очищаем его из видимого текста
+        verdict = "ready_next"  # default
+        reply_clean = reply
+        verdict_match = re.search(r"\[VERDICT:\s*(\w+)\]", reply)
+        if verdict_match:
+            verdict = verdict_match.group(1)
+            reply_clean = reply.replace(verdict_match.group(0), "").strip()
+
         # Document workflow tracking: если был attachment (загруженный файл), сохраняем этап
         doc_id = None
         if attachment:
@@ -461,14 +469,9 @@ def _run_job(job_id, sid, key, msg, attachment=None):
                 )
                 doc_id = result.get("doc_id")
                 attachment["_doc_id"] = doc_id
-            # Парсим VERDICT из ответа
-            verdict = "ready_next"
-            verdict_match = re.search(r"\[VERDICT:\s*(\w+)\]", reply)
-            if verdict_match:
-                verdict = verdict_match.group(1)
-            memory.add_workflow_stage(doc_id, agent=key, input_text=msg, output_text=reply, verdict=verdict)
+            memory.add_workflow_stage(doc_id, agent=key, input_text=msg, output_text=reply_clean, verdict=verdict)
 
-        _set_job(job_id, {"status": "done", "sid": sid, "reply": reply, "doc_id": doc_id})
+        _set_job(job_id, {"status": "done", "sid": sid, "reply": reply_clean, "doc_id": doc_id, "verdict": verdict})
     except Exception:
         logger.exception("Ошибка агента %s (job %s)", key, job_id)
         _set_job(job_id, {"status": "done", "sid": sid, "error": "Внутренняя ошибка — см. логи (logs/webapp.log)"})
@@ -1521,7 +1524,14 @@ const NEXT_ACTIONS={
   ]
 };
 
-function nextActionsFor(agentKey){
+function nextActionsFor(agentKey, verdict){
+  // Условные actions: если needs_revision — вернуться к предыдущему, иначе обычные next actions
+  if(verdict==='needs_revision'){
+    // Для needs_revision показываем кнопку "вернуть с комментарием"
+    // На данный момент просто показываем обычные actions, но с пометкой
+    const actions=(NEXT_ACTIONS[agentKey]||NEXT_ACTIONS.default).slice(0,3);
+    return [{label:'Отправить с комментариями обратно',agent:agentKey,prompt:'Дай детальный комментарий к предыдущему этапу и предложи конкретные исправления.',desc:'Вернуться с правками'},...actions];
+  }
   return (NEXT_ACTIONS[agentKey]||NEXT_ACTIONS.default).slice(0,3);
 }
 
@@ -1531,7 +1541,7 @@ function nextActionsFor(agentKey){
 const TRANSCRIPTS = {};
 
 // Рисует один пузырь в DOM (без записи в стор).
-function drawMsg(text, me, actions){
+function drawMsg(text, me, actions, verdict){
   const chat=document.getElementById('chat');
   const a=agent();
   const row=document.createElement('div'); row.className='row'+(me?' me':'');
@@ -1548,12 +1558,23 @@ function drawMsg(text, me, actions){
   }
 
   const b=document.createElement('div'); b.className='bubble'; b.innerHTML=md(displayText);
+
+  // Показываем verdict статус для agent-ответов
+  if(!me && verdict){
+    const vBadge=document.createElement('div');
+    vBadge.style.cssText='margin-top:8px;font-size:11px;padding:4px 8px;border-radius:6px;display:inline-block;';
+    const vColors={ready_next:'#E3F0E6;color:#2C5F3A',needs_revision:'#FFF3E0;color:#E65100',done:'#E1F5FE;color:#01579B'};
+    const vText={ready_next:'✓ Готово для передачи',needs_revision:'⚠ Нужны правки',done:'✓ Завершено'};
+    vBadge.style.background=vColors[verdict]||vColors.ready_next;
+    vBadge.textContent=vText[verdict]||'Статус неизвестен';
+    b.appendChild(vBadge);
+  }
+
   if(!me && actions && actions.length){
     const wrap=document.createElement('div'); wrap.className='next-actions';
     actions.forEach((act)=>{
       const btn=document.createElement('button'); btn.type='button'; btn.textContent=act.label;
-      if(act.desc) btn.title=act.desc;  // Показываем описание в tooltip
-      // Если агент предложил [→ rita] и есть действие с agent='rita', выделяем его специально.
+      if(act.desc) btn.title=act.desc;
       if(recommendedAgent && act.agent===recommendedAgent) {
         btn.style.outline='2px solid var(--t)'; btn.style.outlineOffset='2px';
       }
@@ -1568,11 +1589,11 @@ function drawMsg(text, me, actions){
 
 // Добавляет сообщение и в стор текущего агента, и на экран.
 // Очищает [→ agent] подсказку перед сохранением.
-function addMsg(text, me, actions){
+function addMsg(text, me, actions, verdict){
   const savedActions=actions||[];
   const cleanText=text.replace(/\s*\[→\s*\w+\]\s*$/, '');
-  (TRANSCRIPTS[cur] = TRANSCRIPTS[cur] || []).push({text:cleanText, me, actions:savedActions});
-  drawMsg(text, me, savedActions);
+  (TRANSCRIPTS[cur] = TRANSCRIPTS[cur] || []).push({text:cleanText, me, actions:savedActions, verdict});
+  drawMsg(text, me, savedActions, verdict);
 }
 
 async function runNextAction(action, context){
@@ -1606,7 +1627,7 @@ function renderAgent(){
   document.querySelectorAll('.apill').forEach(p=>p.classList.toggle('active',p.dataset.k===cur));
   const chat=document.getElementById('chat'); chat.innerHTML='';
   const hist=TRANSCRIPTS[cur];
-  if(hist && hist.length){ hist.forEach(m=>drawMsg(m.text, m.me, m.actions)); }   // реплей сохранённой переписки
+  if(hist && hist.length){ hist.forEach(m=>drawMsg(m.text, m.me, m.actions, m.verdict)); }   // реплей сохранённой переписки
   else { drawMsg(a.intro,false); }                                     // первый визит — только intro
 }
 
@@ -1681,9 +1702,10 @@ async function send(){
       if(!d || d.status==='pending') { addMsg('Ответ ещё готовится. Обнови страницу или попробуй ещё раз через пару минут.',false); return; }
       if(d.error) addMsg('⚠️ Ошибка: '+d.error,false);
       else {
-        // Сохраняем doc_id если есть (для document workflow tracking)
+        // Сохраняем doc_id и verdict (для document workflow tracking и conditional actions)
         if(d.doc_id) currentDocId=d.doc_id;
-        addMsg(d.reply,false,nextActionsFor(cur));
+        const verdict=d.verdict||'ready_next';
+        addMsg(d.reply,false,nextActionsFor(cur, verdict), verdict);
       }
     }
   }catch(e){ addMsg('⚠️ Сеть недоступна: '+e,false); }
