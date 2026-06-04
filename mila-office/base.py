@@ -174,12 +174,24 @@ def _safe_path(path: str) -> Path:
         raise ValueError(f"Путь вне рабочей папки: {path}")
     return p
 
+# Потолок на чтение файла В КОНТЕКСТ модели. Без него read_file большого файла
+# (напр. praktikum_редактура.html ~5 МБ ≈ 1.5 млн токенов) раздувает запрос —
+# это и слив денег, и риск превысить лимит контекста. 40000 символов ≈ 10-13k
+# токенов — достаточно для анализа, дальше модель попросит конкретный фрагмент.
+_READ_MAX_CHARS = int(os.getenv("MILA_READ_MAX_CHARS", "40000"))
+
 def read_file(path: str) -> str:
     try: p = _safe_path(path)
     except ValueError as e: return f"Ошибка: {e}"
-    try: return p.read_text(encoding="utf-8")
+    try:
+        txt = p.read_text(encoding="utf-8")
     except FileNotFoundError: return f"Файл не найден: {p}"
     except Exception as e: return f"Ошибка: {e}"
+    if len(txt) > _READ_MAX_CHARS:
+        return (txt[:_READ_MAX_CHARS] +
+                f"\n\n…[файл обрезан: показано {_READ_MAX_CHARS} из {len(txt)} символов. "
+                f"Попроси конкретный раздел/фрагмент, если нужен остаток.]")
+    return txt
 
 def write_file(path: str, content: str, mode: str = "write") -> str:
     try: p = _safe_path(path)
