@@ -1571,6 +1571,16 @@ INDEX_HTML = r"""<!DOCTYPE html>
     </footer>
   </div>
 
+  <!-- Download popup (when Victoria approves - VERDICT: done) -->
+  <div id="downloadPopup" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:#fff;border-radius:12px;box-shadow:0 20px 60px rgba(0,0,0,.3);padding:32px;z-index:200;max-width:400px;text-align:center">
+    <div style="font-size:48px;margin-bottom:16px">✓</div>
+    <h2 style="margin:0 0 8px;color:#2C1A12;font-size:20px">Воркбук одобрен!</h2>
+    <p style="margin:0 0 24px;color:#7A5E54;font-size:14px">Финальная версия готова к скачиванию</p>
+    <button onclick="downloadWorkbookTXT()" style="display:block;width:100%;background:#C46148;color:#fff;border:none;border-radius:8px;padding:12px;font-size:14px;font-family:inherit;cursor:pointer;margin-bottom:8px;font-weight:bold">Скачать TXT</button>
+    <button onclick="closeDownloadPopup()" style="display:block;width:100%;background:#E0D0C8;color:#2C1A12;border:none;border-radius:8px;padding:12px;font-size:14px;font-family:inherit;cursor:pointer">Закрыть</button>
+  </div>
+  <div id="downloadOverlay" onclick="closeDownloadPopup()" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.5);z-index:199"></div>
+
   <!-- Document detail modal -->
   <div id="docModal">
     <div class="docModalContent">
@@ -1762,6 +1772,11 @@ function addMsg(text, me, actions, verdict){
   (TRANSCRIPTS[cur] = TRANSCRIPTS[cur] || []).push({text:cleanText, me, actions:savedActions, verdict});
   drawMsg(text, me, savedActions, verdict);
   saveSessionToStorage();  // Сохраняем в localStorage
+
+  // Если Victoria одобрила (VERDICT: done) - показываем popup для скачивания
+  if (verdict === 'done' && cur === 'victoria') {
+    setTimeout(() => showDownloadPopup(cleanText), 500);
+  }
 
   // Сохраняем сообщение на сервер в истории агента (с retry logic)
   saveToServerWithRetry(cur, cleanText, me, verdict);
@@ -2672,6 +2687,68 @@ async function load(){
 
   const ev=d.events||[];
   document.getElementById('events').innerHTML=ev.length?ev.map(e=>'<div class="event">'+esc(e.kind)+'<div class="muted">'+esc(e.ts)+' · '+esc(JSON.stringify(e.payload||{}))+'</div></div>').join(''):'<div class="muted">Событий нет</div>';
+}
+
+// ─── Download popup functions ───
+function showDownloadPopup(content){
+  document.getElementById('downloadPopup').style.display='block';
+  document.getElementById('downloadOverlay').style.display='block';
+  // Store content for download
+  window.pendingDownloadContent = content;
+}
+
+function closeDownloadPopup(){
+  document.getElementById('downloadPopup').style.display='none';
+  document.getElementById('downloadOverlay').style.display='none';
+  window.pendingDownloadContent = null;
+}
+
+function downloadWorkbookTXT(){
+  if(!window.pendingDownloadContent) {
+    alert('Нет содержимого для скачивания');
+    return;
+  }
+
+  // Generate TXT file
+  const timestamp = new Date().toLocaleString('ru-RU');
+  const filename = 'workbook_approved_' + new Date().toISOString().split('T')[0] + '.txt';
+
+  const txtContent = `════════════════════════════════════════════════════════════
+ОДОБРЕННЫЙ ВОРКБУК
+════════════════════════════════════════════════════════════
+
+Дата одобрения: ${timestamp}
+Статус: ✓ ОДОБРЕН (VERDICT: done)
+Агент: Victoria (редактор)
+
+════════════════════════════════════════════════════════════
+
+СОДЕРЖИМОЕ:
+
+${window.pendingDownloadContent}
+
+════════════════════════════════════════════════════════════
+
+Готово к:
+✓ Загрузке в GAMMA (gamma.app)
+✓ Отправке Marina для переформатирования
+✓ Печати и распространению
+
+════════════════════════════════════════════════════════════`;
+
+  // Create blob and download
+  const blob = new Blob([txtContent], {type: 'text/plain; charset=utf-8'});
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+
+  // Close popup after download
+  setTimeout(() => closeDownloadPopup(), 500);
 }
 
 // ─── Document management functions ───
