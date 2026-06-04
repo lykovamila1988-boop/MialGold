@@ -1695,6 +1695,7 @@ function addMsg(text, me, actions, verdict){
   const cleanText=text.replace(/\s*\[→\s*\w+\]\s*$/, '');
   (TRANSCRIPTS[cur] = TRANSCRIPTS[cur] || []).push({text:cleanText, me, actions:savedActions, verdict});
   drawMsg(text, me, savedActions, verdict);
+  saveSessionToStorage();  // Сохраняем в localStorage после каждого сообщения
 }
 
 async function runNextAction(action, context){
@@ -1732,7 +1733,7 @@ function renderAgent(){
   else { drawMsg(a.intro,false); }                                     // первый визит — только intro
 }
 
-function switchAgent(k){ cur=k; renderAgent(); }
+function switchAgent(k){ cur=k; renderAgent(); saveSessionToStorage(); }
 
 async function uploadSelectedFile(file){
   if(!file) return;
@@ -1804,7 +1805,10 @@ async function send(){
       if(d.error) addMsg('⚠️ Ошибка: '+d.error,false);
       else {
         // Сохраняем doc_id и verdict (для document workflow tracking и conditional actions)
-        if(d.doc_id) currentDocId=d.doc_id;
+        if(d.doc_id){
+          currentDocId=d.doc_id;
+          saveSessionToStorage();
+        }
         const verdict=d.verdict||'ready_next';
         addMsg(d.reply,false,nextActionsFor(cur, verdict), verdict);
       }
@@ -1825,7 +1829,53 @@ async function resetSession(){
   if(!confirm('Очистить переписку со всеми агентами?')) return;
   await postJSON('/api/reset',{all:true});
   for(const k in TRANSCRIPTS) delete TRANSCRIPTS[k];
+  currentDocId=null;
+  localStorage.removeItem('mila_transcripts');
+  localStorage.removeItem('mila_current_agent');
+  localStorage.removeItem('mila_current_doc_id');
   renderAgent();
+}
+
+// ─── localStorage persistence for session ───
+function saveSessionToStorage(){
+  // Сохраняет TRANSCRIPTS и текущего агента в localStorage
+  try{
+    localStorage.setItem('mila_transcripts', JSON.stringify(TRANSCRIPTS));
+    if(cur) localStorage.setItem('mila_current_agent', cur);
+    if(currentDocId) localStorage.setItem('mila_current_doc_id', currentDocId);
+  }catch(e){
+    console.warn('Could not save to localStorage:', e);
+  }
+}
+
+function loadSessionFromStorage(){
+  // Загружает TRANSCRIPTS из localStorage
+  try{
+    const saved=localStorage.getItem('mila_transcripts');
+    if(saved){
+      Object.assign(TRANSCRIPTS, JSON.parse(saved));
+      console.log('Session restored from localStorage');
+      // Показываем уведомление что сессия восстановлена
+      const msgCount=Object.values(TRANSCRIPTS).reduce((sum,msgs)=>sum+(msgs||[]).length,0);
+      if(msgCount>0){
+        setTimeout(()=>{
+          const ch=document.getElementById('chat');
+          if(ch){
+            const notice=document.createElement('div');
+            notice.style.cssText='text-align:center;color:#7A5E54;font-size:12px;padding:8px;margin:8px 0;border-top:1px solid #E0D0C8;border-bottom:1px solid #E0D0C8';
+            notice.textContent='Сессия восстановлена ('+msgCount+' сообщений)';
+            ch.insertBefore(notice, ch.firstChild);
+          }
+        },100);
+      }
+    }
+    const savedAgent=localStorage.getItem('mila_current_agent');
+    if(savedAgent) cur=savedAgent;
+    const savedDocId=localStorage.getItem('mila_current_doc_id');
+    if(savedDocId) currentDocId=savedDocId;
+  }catch(e){
+    console.warn('Could not load from localStorage:', e);
+  }
 }
 
 window.onload=async()=>{
@@ -1881,7 +1931,13 @@ window.onload=async()=>{
   document.getElementById('send').onclick=send;
   document.getElementById('resetBtn').onclick=resetChat;
   document.getElementById('resetSessBtn').onclick=resetSession;
-  switchAgent(AGENTS[0].key);
+
+  // Загружаем сохранённую сессию из localStorage
+  loadSessionFromStorage();
+
+  // Если агент был выбран ранее, переходим к нему, иначе первый
+  const initialAgent=cur||AGENTS[0].key;
+  switchAgent(initialAgent);
 };
 </script>
 </body>
@@ -2431,6 +2487,8 @@ let currentViewingDocId=null;
 
 async function openDocModal(docId){
   currentViewingDocId=docId;
+  if(docId) currentDocId=docId;
+  saveSessionToStorage();
   try{
     const resp=await fetch('/api/document/'+encodeURIComponent(docId));
     if(!resp.ok) throw new Error('Document not found');
