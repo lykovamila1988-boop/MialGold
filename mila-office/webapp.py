@@ -1318,6 +1318,18 @@ def api_reply_delete(reply_id: str):
     return jsonify({"ok": False, "error": "Ответ не найден"}), 400
 
 
+@app.get("/api/documents")
+def api_documents():
+    """Список активных и завершённых документ-workflows."""
+    in_progress = memory.list_workflows("in_progress", limit=20)
+    completed = memory.list_workflows("completed", limit=20)
+    return jsonify({
+        "ok": True,
+        "in_progress": in_progress,
+        "completed": completed
+    })
+
+
 @app.get("/api/document/<doc_id>")
 def api_document(doc_id: str):
     """Получить историю документа через все этапы обработки."""
@@ -2166,11 +2178,14 @@ OPERATOR_HTML = r"""<!DOCTYPE html>
   <div class="top"><a href="/">Агенты</a><a href="/dashboard">Дашборд</a><a href="/settings">Настройки</a><button onclick="load()">Обновить</button></div>
   <div class="tabs" id="tabs"></div>
   <div class="grid">
-    <div class="card scroll"><h2>Задачи</h2><div class="body" id="tasks"></div></div>
+    <div class="col" style="display:flex;flex-direction:column;gap:16px">
+      <div class="card scroll" style="flex:1 1 auto"><h2>Задачи</h2><div class="body" id="tasks"></div></div>
+      <div class="card scroll" style="flex:0 1 auto;max-height:35%"><h2>Документы в обработке</h2><div class="body" id="documents"></div></div>
+    </div>
     <div class="col">
       <div class="card" style="flex:0 0 auto"><h2>Supervisor</h2><div id="supervisor" class="muted"></div></div>
-      <div class="card scroll" style="flex:0 1 auto;max-height:30%"><h2>Ждут одобрения</h2><div class="body" id="approvals"></div></div>
-      <div class="card scroll" style="flex:0 1 auto;max-height:30%"><h2>Очередь ответов</h2><div class="body" id="reply_queue"></div></div>
+      <div class="card scroll" style="flex:0 1 auto;max-height:25%"><h2>Ждут одобрения</h2><div class="body" id="approvals"></div></div>
+      <div class="card scroll" style="flex:0 1 auto;max-height:25%"><h2>Очередь ответов</h2><div class="body" id="reply_queue"></div></div>
       <div class="card scroll" style="flex:1 1 auto"><h2>Последние события</h2><div class="body" id="events"></div></div>
     </div>
   </div>
@@ -2296,6 +2311,28 @@ async function load(){
     if(rq.pending>0){rqHtml+='<div style="margin-top:10px;display:flex;gap:8px"><button class="actions" style="display:inline-block;border:1px solid var(--b);background:var(--w);border-radius:8px;padding:5px 10px;font-size:12px;font-family:inherit;cursor:pointer;color:var(--n);transition:.15s" onclick="sendReplyOne()" title="Отправить один ответ из очереди">Отправить 1</button><button class="actions" style="display:inline-block;border:1px solid var(--b);background:var(--w);border-radius:8px;padding:5px 10px;font-size:12px;font-family:inherit;cursor:pointer;color:var(--n);transition:.15s" onclick="sendReplyAll()" title="Отправить все ответы из очереди подряд">Отправить все</button></div>';}
   }
   document.getElementById('reply_queue').innerHTML=rqTot?rqHtml:'<div class="muted">Очередь пуста</div>';
+
+  // Документ workflows (timeline)
+  try{
+    const docs=await (await fetch('/api/documents')).json();
+    const inProg=(docs.in_progress||[]).slice(0,5);
+    let docHtml=inProg.length?inProg.map(d=>{
+      const stages=(d.stages||[]);
+      const names={'victoria':'Виктория','rita':'Рита','marina':'Марина','lera':'Лера',
+        'producer':'Продюсер','manager':'Менеджер','vasya':'Вася','dima':'Дима',
+        'tyoma':'Тёма','olya':'Оля','alina':'Алина'};
+      const vBadges={'ready_next':'✓','needs_revision':'⚠','done':'✓'};
+      let tl='<div style="font-size:12px;margin:8px 0"><b>'+esc(d.file_name)+'</b><div style="color:var(--u);margin-top:3px">';
+      stages.forEach((s,i)=>{
+        tl+='<span>'+esc(names[s.agent]||s.agent)+'</span><span style="color:#888">'+vBadges[s.verdict]+'</span>';
+        if(i<stages.length-1) tl+=' → ';
+      });
+      tl+='</div><div style="color:#999;font-size:11px;margin-top:4px">'+esc(rel(d.created_at))+'</div></div>';
+      return tl;
+    }).join(''):'<div class="muted">Нет активных документов</div>';
+    document.getElementById('documents').innerHTML=docHtml;
+  }catch(e){ document.getElementById('documents').innerHTML='<div class="muted">Ошибка загрузки: '+esc(e)+'</div>'; }
+
   const ev=d.events||[];
   document.getElementById('events').innerHTML=ev.length?ev.map(e=>'<div class="event">'+esc(e.kind)+'<div class="muted">'+esc(e.ts)+' · '+esc(JSON.stringify(e.payload||{}))+'</div></div>').join(''):'<div class="muted">Событий нет</div>';
 }
