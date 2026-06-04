@@ -762,7 +762,18 @@ def run_agent(client, system: str, tools: list, tool_handler, user_message: str,
     provider = provider_for_agent(agent_key)
     if provider == "gemini":
         return _run_gemini_agent(system, tools, tool_handler, messages, history)
-    return _run_anthropic_agent(client, system, tools, tool_handler, messages, history)
+    # Claude-агенты (Стас, Кирилл): если Claude недоступен (нет кредитов, 429,
+    # сеть) — НЕ падаем, а откатываемся на Gemini. Tool-loop пишет в локальный
+    # messages, не в history, поэтому при сбое history чистая (только user-msg) —
+    # можно безопасно перезапустить на Gemini со свежей копией.
+    try:
+        return _run_anthropic_agent(client, system, tools, tool_handler, messages, history)
+    except Exception as e:
+        if not GEMINI_KEY:
+            raise  # фолбэка нет — пробрасываем исходную ошибку Claude
+        console.print(f"[yellow]Claude недоступен ({str(e)[:80]}) → фолбэк на Gemini[/yellow]")
+        log("llm", f"fallback claude->gemini agent={agent_key}: {str(e)[:120]}")
+        return _run_gemini_agent(system, tools, tool_handler, history.copy(), history)
 
 def chat_loop(name: str, emoji: str, color: str, system: str, tools: list, tool_handler, quick_cmds: dict):
     client = get_client()
