@@ -1031,6 +1031,76 @@ def list_workflows(status: str = None, limit: int = 20) -> list:
     return sorted(docs, key=lambda d: d.get("created_at", ""), reverse=True)[:limit]
 
 
+def add_backward_feedback(doc_id: str, from_agent: str, to_agent: str,
+                          feedback: str) -> dict:
+    """Отправить правки от одного агента назад к другому агенту.
+    Создаёт обратное сообщение в цепочке обработки."""
+    workflows = _read_json(DOC_WORKFLOWS, {})
+    if doc_id not in workflows:
+        return {"ok": False, "error": f"doc {doc_id} not found"}
+
+    doc = workflows[doc_id]
+    if "feedback_chain" not in doc:
+        doc["feedback_chain"] = []
+
+    feedback_entry = {
+        "from_agent": from_agent,
+        "to_agent": to_agent,
+        "feedback": feedback,
+        "timestamp": _now(),
+    }
+    doc["feedback_chain"].append(feedback_entry)
+
+    with _FileLock():
+        _write_json(DOC_WORKFLOWS, workflows)
+
+    log_event(f"doc:feedback:backward", {
+        "doc_id": doc_id,
+        "from": from_agent,
+        "to": to_agent
+    })
+    return {"ok": True, "doc_id": doc_id, "feedback_count": len(doc["feedback_chain"])}
+
+
+def archive_document(doc_id: str) -> dict:
+    """Архивировать документ (переместить из in_progress в архив)."""
+    workflows = _read_json(DOC_WORKFLOWS, {})
+    if doc_id not in workflows:
+        return {"ok": False, "error": f"doc {doc_id} not found"}
+
+    doc = workflows[doc_id]
+    doc["status"] = "archived"
+    doc["archived_at"] = _now()
+
+    with _FileLock():
+        _write_json(DOC_WORKFLOWS, workflows)
+
+    log_event(f"doc:archived", {"doc_id": doc_id})
+    return {"ok": True, "doc_id": doc_id}
+
+
+def export_document(doc_id: str) -> dict:
+    """Экспортировать документ со всей историей (для скачивания)."""
+    workflows = _read_json(DOC_WORKFLOWS, {})
+    if doc_id not in workflows:
+        return {"ok": False, "error": f"doc {doc_id} not found"}
+
+    doc = workflows[doc_id]
+    export_data = {
+        "id": doc.get("id"),
+        "file_name": doc.get("file_name"),
+        "created_at": doc.get("created_at"),
+        "completed_at": doc.get("archived_at"),
+        "status": doc.get("status"),
+        "original_content": doc.get("original_content"),
+        "stages": doc.get("stages", []),
+        "feedback_chain": doc.get("feedback_chain", []),
+    }
+
+    log_event(f"doc:exported", {"doc_id": doc_id})
+    return {"ok": True, "export": export_data}
+
+
 if __name__ == "__main__":
     # Быстрый самотест без сети и без LLM.
     print("MEM_DIR:", MEM_DIR)

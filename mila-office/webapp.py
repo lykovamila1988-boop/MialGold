@@ -1339,6 +1339,44 @@ def api_document(doc_id: str):
     return jsonify({"ok": True, "document": doc})
 
 
+@app.post("/api/document/<doc_id>/feedback")
+def api_document_feedback(doc_id: str):
+    """Отправить правки от одного агента к другому."""
+    data = request.get_json() or {}
+    from_agent = data.get("from_agent")
+    to_agent = data.get("to_agent")
+    feedback = data.get("feedback", "")
+
+    if not (from_agent and to_agent and feedback):
+        return jsonify({"ok": False, "error": "Missing from_agent, to_agent, or feedback"}), 400
+
+    result = memory.add_backward_feedback(doc_id, from_agent, to_agent, feedback)
+    return jsonify(result)
+
+
+@app.post("/api/document/<doc_id>/archive")
+def api_document_archive(doc_id: str):
+    """Архивировать документ."""
+    result = memory.archive_document(doc_id)
+    return jsonify(result)
+
+
+@app.post("/api/document/<doc_id>/export")
+def api_document_export(doc_id: str):
+    """Экспортировать документ со всей историей (JSON)."""
+    result = memory.export_document(doc_id)
+    if not result.get("ok"):
+        return jsonify(result), 404
+
+    # Отдаём как JSON-файл для скачивания
+    export = result.get("export", {})
+    filename = f"{export.get('file_name', 'document')}_history.json"
+    response = Response(json.dumps(export, ensure_ascii=False, indent=2),
+                       mimetype="application/json")
+    response.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+    return response
+
+
 @app.get("/favicon.ico")
 def favicon():
     # Браузер всегда просит /favicon.ico — без маршрута это 404 в консоли.
@@ -1421,6 +1459,33 @@ INDEX_HTML = r"""<!DOCTYPE html>
   #send{width:46px;height:46px;border-radius:50%;border:none;background:var(--t);color:#fff;font-size:18px;cursor:pointer;flex-shrink:0}
   #send:disabled{opacity:.4;cursor:default}
   .hint{text-align:center;font-size:11px;color:var(--u);margin-top:8px}
+
+  /* Document modal styles */
+  #docModal{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.5);z-index:100;align-items:center;justify-content:center}
+  #docModal.show{display:flex}
+  .docModalContent{background:var(--c);border-radius:12px;box-shadow:0 20px 60px rgba(0,0,0,.3);width:90%;max-width:900px;max-height:85vh;overflow-y:auto;padding:24px}
+  .docModalContent .header{display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;border-bottom:1px solid var(--b);padding-bottom:16px}
+  .docModalContent .header h2{margin:0;color:var(--n);font-size:20px}
+  .docModalContent .header .close{background:none;border:none;font-size:24px;cursor:pointer;color:var(--u);transition:.15s}
+  .docModalContent .header .close:hover{color:var(--t)}
+  .docStage{margin-bottom:20px;padding:14px;border:1px solid var(--b);border-radius:8px;background:var(--w)}
+  .docStage .agent{font-weight:bold;color:var(--t);font-size:14px}
+  .docStage .verdict{display:inline-block;margin-left:10px;font-size:11px;padding:2px 6px;border-radius:4px}
+  .docStage .verdict.ready_next{background:#E3F0E6;color:#2C5F3A}
+  .docStage .verdict.needs_revision{background:#FFF3E0;color:#E65100}
+  .docStage .verdict.done{background:#E1F5FE;color:#01579B}
+  .docStage .time{font-size:11px;color:#999;margin-top:4px}
+  .docStage .content{margin-top:8px;font-size:13px;line-height:1.5;color:var(--n);white-space:pre-wrap;word-wrap:break-word}
+  .docActions{display:flex;gap:10px;margin-top:20px;padding-top:16px;border-top:1px solid var(--b);flex-wrap:wrap}
+  .docActions button{border:1px solid var(--b);background:var(--w);color:var(--n);border-radius:8px;padding:8px 14px;font-size:13px;font-family:inherit;cursor:pointer;transition:.15s}
+  .docActions button:hover{border-color:var(--t);color:var(--t);background:rgba(196,97,74,.08)}
+  .docActions button.primary{background:var(--t);color:#fff;border-color:var(--t);font-weight:bold}
+  .docActions button.primary:hover{background:#A84026;border-color:#A84026}
+  .feedbackBox{margin-top:12px;padding:12px;background:#F5F5F5;border-radius:6px;display:none}
+  .feedbackBox.show{display:block}
+  .feedbackBox textarea{width:100%;min-height:80px;padding:8px;border:1px solid var(--b);border-radius:4px;font-family:inherit;font-size:12px;resize:vertical}
+  .feedbackBox .actions{display:flex;gap:8px;margin-top:8px}
+  .feedbackBox .actions button{font-size:12px;padding:6px 12px}
 </style>
 </head>
 <body>
@@ -1445,6 +1510,30 @@ INDEX_HTML = r"""<!DOCTYPE html>
       </div>
       <div class="hint">Enter — отправить · Shift+Enter — новая строка</div>
     </footer>
+  </div>
+
+  <!-- Document detail modal -->
+  <div id="docModal">
+    <div class="docModalContent">
+      <div class="header">
+        <h2 id="docTitle">Документ</h2>
+        <button class="close" onclick="closeDocModal()">✕</button>
+      </div>
+      <div id="docDetails"></div>
+      <div id="feedbackChain"></div>
+      <div class="docActions">
+        <button class="primary" id="docFeedbackBtn" onclick="toggleFeedbackBox()">💬 Отправить правки назад</button>
+        <button id="docArchiveBtn" onclick="archiveDoc()">📦 Архивировать</button>
+        <button id="docExportBtn" onclick="exportDoc()">⬇️ Скачать историю</button>
+      </div>
+      <div class="feedbackBox" id="feedbackBox">
+        <textarea id="feedbackText" placeholder="Опиши правки, которые нужны: что переписать, что добавить/убрать, какие исправления…"></textarea>
+        <div class="actions">
+          <button onclick="sendFeedback()" class="primary">Отправить</button>
+          <button onclick="toggleFeedbackBox()">Отмена</button>
+        </div>
+      </div>
+    </div>
   </div>
 <script>
 let AGENTS=[], cur=null, CSRF='', activeJob=null, pendingUpload=null, currentDocId=null;
@@ -2322,7 +2411,7 @@ async function load(){
         'producer':'Продюсер','manager':'Менеджер','vasya':'Вася','dima':'Дима',
         'tyoma':'Тёма','olya':'Оля','alina':'Алина'};
       const vBadges={'ready_next':'✓','needs_revision':'⚠','done':'✓'};
-      let tl='<div style="font-size:12px;margin:8px 0"><b>'+esc(d.file_name)+'</b><div style="color:var(--u);margin-top:3px">';
+      let tl='<div style="font-size:12px;margin:8px 0;cursor:pointer;padding:8px;border-radius:6px;transition:.15s;border:1px solid transparent" onmouseover="this.style.background=\'rgba(196,97,74,.08);border-color=#E0D0C8\'" onmouseout="this.style.background=\'transparent\'" onclick="openDocModal(\''+esc(d.id)+'\')" title="Нажми для просмотра полной истории"><b>'+esc(d.file_name)+'</b><div style="color:var(--u);margin-top:3px">';
       stages.forEach((s,i)=>{
         tl+='<span>'+esc(names[s.agent]||s.agent)+'</span><span style="color:#888">'+vBadges[s.verdict]+'</span>';
         if(i<stages.length-1) tl+=' → ';
@@ -2336,6 +2425,148 @@ async function load(){
   const ev=d.events||[];
   document.getElementById('events').innerHTML=ev.length?ev.map(e=>'<div class="event">'+esc(e.kind)+'<div class="muted">'+esc(e.ts)+' · '+esc(JSON.stringify(e.payload||{}))+'</div></div>').join(''):'<div class="muted">Событий нет</div>';
 }
+
+// ─── Document management functions ───
+let currentViewingDocId=null;
+
+async function openDocModal(docId){
+  currentViewingDocId=docId;
+  try{
+    const resp=await fetch('/api/document/'+encodeURIComponent(docId));
+    if(!resp.ok) throw new Error('Document not found');
+    const data=await resp.json();
+    if(!data.ok) throw new Error(data.error||'Error loading document');
+
+    const doc=data.document;
+    document.getElementById('docTitle').textContent='📄 '+esc(doc.file_name);
+
+    let html='<div style="margin-bottom:16px"><strong>Создан:</strong> '+esc(rel(doc.created_at))+'<br><strong>Статус:</strong> '+esc(doc.status)+'</div>';
+    html+='<div style="margin-bottom:16px;padding:12px;background:#F5F5F5;border-radius:6px;font-size:12px"><strong>Исходный материал:</strong><br>'+esc(doc.original_content||'[нет содержимого]')+'</div>';
+    html+='<h3 style="margin:20px 0 12px;font-size:16px">История обработки</h3>';
+
+    (doc.stages||[]).forEach((stage,idx)=>{
+      const names={'victoria':'Виктория','rita':'Рита','marina':'Марина','lera':'Лера',
+        'producer':'Продюсер','manager':'Менеджер','vasya':'Вася','dima':'Дима',
+        'tyoma':'Тёма','olya':'Оля','alina':'Алина'};
+      html+='<div class="docStage">';
+      html+='<div class="agent">'+idx+'. '+esc(names[stage.agent]||stage.agent);
+      html+='<span class="verdict '+esc(stage.verdict)+'">'+esc(stage.verdict)+'</span></div>';
+      html+='<div class="time">'+esc(new Date(stage.timestamp).toLocaleString('ru-RU'))+'</div>';
+      if(stage.input) html+='<div style="margin-top:8px"><strong>Исходный текст:</strong><div class="content">'+esc(stage.input)+'</div></div>';
+      if(stage.output) html+='<div style="margin-top:8px"><strong>Результат:</strong><div class="content">'+esc(stage.output)+'</div></div>';
+      html+='</div>';
+    });
+
+    document.getElementById('docDetails').innerHTML=html;
+
+    // Feedback chain
+    if(doc.feedback_chain && doc.feedback_chain.length){
+      let fbHtml='<h3 style="margin:20px 0 12px;font-size:16px">Правки и комментарии</h3>';
+      (doc.feedback_chain||[]).forEach((fb)=>{
+        const names={'victoria':'Виктория','rita':'Рита','marina':'Марина','lera':'Лера',
+          'producer':'Продюсер','manager':'Менеджер','vasya':'Вася','dima':'Дима',
+          'tyoma':'Тёма','olya':'Оля','alina':'Алина'};
+        fbHtml+='<div class="docStage">';
+        fbHtml+='<div class="agent">'+esc(names[fb.from_agent]||fb.from_agent)+' → '+esc(names[fb.to_agent]||fb.to_agent)+'</div>';
+        fbHtml+='<div class="time">'+esc(new Date(fb.timestamp).toLocaleString('ru-RU'))+'</div>';
+        fbHtml+='<div class="content">'+esc(fb.feedback)+'</div>';
+        fbHtml+='</div>';
+      });
+      document.getElementById('feedbackChain').innerHTML=fbHtml;
+    }
+
+    document.getElementById('docModal').classList.add('show');
+  }catch(e){
+    alert('Ошибка: '+e.message);
+  }
+}
+
+function closeDocModal(){
+  document.getElementById('docModal').classList.remove('show');
+  currentViewingDocId=null;
+}
+
+function toggleFeedbackBox(){
+  const box=document.getElementById('feedbackBox');
+  box.classList.toggle('show');
+  if(box.classList.contains('show')){
+    document.getElementById('feedbackText').focus();
+  }
+}
+
+async function sendFeedback(){
+  const feedback=document.getElementById('feedbackText').value.trim();
+  if(!feedback) { alert('Введи текст правок'); return; }
+  if(!currentViewingDocId) return;
+
+  // Определяем агентов для обратной связи
+  // Берём последнего агента и отправляем правки обратно к нему
+  // (в реальном использовании нужно дать пользователю выбрать агентов)
+  const docResp=await fetch('/api/document/'+encodeURIComponent(currentViewingDocId));
+  const docData=await docResp.json();
+  const stages=docData.document.stages||[];
+  if(stages.length<1) { alert('Нет этапов для отправки правок'); return; }
+
+  const lastStage=stages[stages.length-1];
+  const fromAgent=lastStage.agent;
+  const prevStage=stages[stages.length-2];
+  const toAgent=prevStage?prevStage.agent:fromAgent;
+
+  try{
+    const r=await postJSON('/api/document/'+encodeURIComponent(currentViewingDocId)+'/feedback',{
+      from_agent:fromAgent,
+      to_agent:toAgent,
+      feedback:feedback
+    });
+    if(!r.ok) throw new Error('Error sending feedback');
+    const res=await r.json();
+    if(res.ok){
+      alert('Правки отправлены!');
+      toggleFeedbackBox();
+      document.getElementById('feedbackText').value='';
+      await openDocModal(currentViewingDocId);
+    }else throw new Error(res.error);
+  }catch(e){
+    alert('Ошибка: '+e.message);
+  }
+}
+
+async function archiveDoc(){
+  if(!currentViewingDocId) return;
+  if(!confirm('Архивировать документ?')) return;
+
+  try{
+    const r=await postJSON('/api/document/'+encodeURIComponent(currentViewingDocId)+'/archive',{});
+    if(!r.ok) throw new Error('Error archiving');
+    const res=await r.json();
+    if(res.ok){
+      alert('Документ архивирован!');
+      closeDocModal();
+      load();
+    }else throw new Error(res.error);
+  }catch(e){
+    alert('Ошибка: '+e.message);
+  }
+}
+
+async function exportDoc(){
+  if(!currentViewingDocId) return;
+  try{
+    const a=document.createElement('a');
+    a.href='/api/document/'+encodeURIComponent(currentViewingDocId)+'/export';
+    a.download='document_history.json';
+    a.click();
+  }catch(e){
+    alert('Ошибка: '+e.message);
+  }
+}
+
+// Клик вне модала закрывает его
+document.addEventListener('click',function(e){
+  const modal=document.getElementById('docModal');
+  if(e.target===modal) closeDocModal();
+});
+
 load();
 </script></body></html>"""
 
