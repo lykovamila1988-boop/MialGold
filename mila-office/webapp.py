@@ -208,6 +208,10 @@ _histories = {}
 _locks = {k: threading.Lock() for k in AGENTS}  # свой замок на агента → разные агенты параллельны
 _jobs_lock = threading.Lock()
 
+# Логирование истории в файлы для персистентности
+_SESSION_LOGS_DIR = base.MILA_FOLDER / "logs" / "sessions"
+_SESSION_LOGS_DIR.mkdir(parents=True, exist_ok=True)
+
 # Фоновые задачи: агент может думать десятки секунд. Не держим HTTP-запрос
 # открытым — кладём вызов в пул, фронтенд опрашивает /api/result.
 _pool = ThreadPoolExecutor(max_workers=4)
@@ -471,8 +475,58 @@ def _protect_post_routes():
         abort(403)
 
 
+def _save_session_message(sid, agent_key, role, content):
+    """Сохранить сообщение в JSONL файл для персистентности."""
+    import datetime as _dt
+    log_dir = _SESSION_LOGS_DIR / sid
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / f"{agent_key}.jsonl"
+    try:
+        with open(log_file, "a", encoding="utf-8") as f:
+            json.dump({
+                "timestamp": _dt.datetime.utcnow().isoformat(),
+                "role": role,
+                "content": content
+            }, f, ensure_ascii=False)
+            f.write("\n")
+    except Exception as e:
+        logger.warning(f"Failed to save session message: {e}")
+
+
+def _load_session_history(sid, agent_key):
+    """Загрузить историю агента из JSONL файла."""
+    log_file = _SESSION_LOGS_DIR / sid / f"{agent_key}.jsonl"
+    if not log_file.exists():
+        return []
+    history = []
+    try:
+        with open(log_file, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    msg = json.loads(line)
+                    # Восстанавливаем исходный формат истории
+                    history.append({
+                        "role": msg.get("role", "user"),
+                        "content": msg.get("content", "")
+                    })
+                except json.JSONDecodeError:
+                    pass
+    except Exception as e:
+        logger.warning(f"Failed to load session history: {e}")
+        return []
+    return history
+
+
 def _session_histories(sid):
-    return _histories.setdefault(sid, {k: [] for k in AGENTS})
+    """Получить историю по сессии, загружая из файлов если нужно."""
+    if sid not in _histories:
+        _histories[sid] = {}
+        for k in AGENTS:
+            _histories[sid][k] = _load_session_history(sid, k)
+    return _histories[sid]
 
 
 def _trim(history):
@@ -522,6 +576,87 @@ def _looks_garbled(text: str) -> bool:
     return (mixed / cyr_tokens) > 0.30
 
 
+def _ocr_one_page(args) -> str:
+    """Распознать одну отрендеренную страницу через Gemini. args=(idx, png_bytes,
+    url, key, prompt). Возвращает текст или пометку об ошибке. С ретраями на 429/5xx."""
+    import base64, time as _t
+    idx, png, url, key, prompt = args
+    payload = {
+        "contents": [{"role": "user", "parts": [
+            {"text": prompt},
+            {"inline_data": {"mime_type": "image/png",
+                             "data": base64.b64encode(png).decode()}},
+        ]}],
+        "generationConfig": {"maxOutputTokens": 2048,
+                             "thinkingConfig": {"thinkingBudget": 0}},
+    }
+    for attempt in range(3):
+        try:
+            r = requests.post(url, params={"key": key}, json=payload, timeout=90)
+            if r.status_code in (429, 500, 502, 503, 504):
+                _t.sleep(1.5 * (attempt + 1))
+                continue
+            if r.status_code != 200:
+                return f"[стр. {idx+1}: OCR ошибка {r.status_code}]"
+            parts = r.json().get("candidates", [{}])[0].get("content", {}).get("parts", [])
+            return ("\n".join(p.get("text", "") for p in parts if p.get("text")).strip()
+                    or f"[стр. {idx+1}: пусто]")
+        except Exception as e:
+            if attempt == 2:
+                return f"[стр. {idx+1}: OCR сбой {type(e).__name__}]"
+            _t.sleep(1.5 * (attempt + 1))
+    return f"[стр. {idx+1}: OCR не удался]"
+
+
+def _pdf_ocr_via_gemini(raw: bytes) -> tuple[str, str]:
+    """Фолбэк для PDF с битым текстовым слоем (GAMMA-экспорт и т.п.): визуальный
+    слой страниц чистый, поэтому рендерим страницы в PNG (PyMuPDF) и распознаём
+    текст через Gemini (мультимодальный), параллельно. Возвращает (text, note);
+    пусто — если нет PyMuPDF / GEMINI_KEY или распознать не удалось."""
+    try:
+        import fitz  # PyMuPDF
+    except Exception:
+        return "", "OCR недоступен: не установлен PyMuPDF (pip install pymupdf)."
+    key = getattr(base, "GEMINI_KEY", "")
+    if not key:
+        return "", "OCR недоступен: не задан GEMINI_KEY для распознавания страниц."
+    max_pages = int(os.getenv("MILA_PDF_OCR_PAGES", "15"))
+    model = getattr(base, "GEMINI_MODEL", "gemini-2.5-flash")
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    prompt = ("Перед тобой страница PDF — рабочая тетрадь по психологии на русском. "
+              "Извлеки ВЕСЬ читаемый текст со страницы дословно: заголовки, списки, "
+              "вопросы, подписи. Сохрани порядок. Ничего не добавляй от себя и не "
+              "комментируй — только текст страницы.")
+    try:
+        doc = fitz.open(stream=raw, filetype="pdf")
+    except Exception as e:
+        return "", f"OCR: не удалось открыть PDF ({type(e).__name__})."
+    total = len(doc)
+    n = min(total, max_pages)
+    # Рендер делаем последовательно (быстро, CPU), сетевые вызовы — параллельно.
+    jobs = []
+    for i in range(n):
+        try:
+            png = doc[i].get_pixmap(dpi=130).tobytes("png")
+            jobs.append((i, png, url, key, prompt))
+        except Exception as e:
+            jobs.append((i, b"", url, key, prompt))
+    doc.close()
+    from concurrent.futures import ThreadPoolExecutor
+    results = [""] * n
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        for i, txt in zip(range(n), ex.map(_ocr_one_page, jobs)):
+            results[i] = txt
+    text = "\n\n".join(results).strip()
+    if not text:
+        return "", "OCR не дал результата (страницы не распознались)."
+    if total > n:
+        text += f"\n\n[…распознаны первые {n} из {total} страниц; лимит MILA_PDF_OCR_PAGES]"
+    note = ("Текст распознан со страниц (OCR через Gemini) — у PDF повреждён "
+            "текстовый слой. Возможны мелкие неточности.")
+    return text, note
+
+
 def _extract_pdf_text(raw: bytes) -> tuple[str, str]:
     import io
     try:
@@ -537,11 +672,16 @@ def _extract_pdf_text(raw: bytes) -> tuple[str, str]:
         for page in reader.pages[:30]:
             pages.append(page.extract_text() or "")
         text = "\n\n".join(pages).strip()
+        garbled = _looks_garbled(text)
+        # Нет текста ИЛИ битый слой → пробуем OCR по картинкам страниц (если включён).
+        if (not text or garbled) and os.getenv("MILA_PDF_OCR", "1").lower() in ("1", "true", "yes"):
+            ocr_text, ocr_note = _pdf_ocr_via_gemini(raw)
+            if ocr_text and not _looks_garbled(ocr_text):
+                return ocr_text, ocr_note
         if not text:
-            return "", "PDF загружен, но текст не найден. Возможно, это скан; загрузи картинку или установи OCR."
-        if _looks_garbled(text):
-            # Не скармливаем агенту кашу как «содержимое» — он не сможет оценить.
-            # Отдаём честное объяснение + короткий образец, чтобы был виден характер сбоя.
+            return "", "PDF загружен, но текст не найден. Возможно, это скан; загрузи картинку или установи OCR (PyMuPDF + GEMINI_KEY)."
+        if garbled:
+            # OCR не вышел/выключен — честно объясняем и даём образец каши.
             note = (
                 "⚠️ Текстовый слой этого PDF повреждён (похоже на экспорт из GAMMA с "
                 "subset-шрифтами без ToUnicode): при извлечении получается нечитаемая "
@@ -715,6 +855,10 @@ def _run_job(job_id, sid, key, msg, attachment=None):
             histories = _session_histories(sid)
             reply, new_hist = AGENTS[key]["responder"](msg, histories[key])
             histories[key] = _trim(new_hist)
+            # Сохранить обновлённую историю в файлы для персистентности
+            for item in new_hist:
+                if isinstance(item, dict):
+                    _save_session_message(sid, key, item.get("role", "user"), item.get("content", ""))
         _log_activity({"agent": key, "message": (msg or "")[:1000],
                        "msg_len": len(msg or ""), "has_attachment": bool(attachment),
                        "response_ms": int((_t.time() - _t0) * 1000), "ok": True})
