@@ -38,6 +38,46 @@ LOG_FILE = LOGS / "webapp.log"
 
 load_dotenv(ROOT / "tools" / ".env")
 _EXC_RE = re.compile(r"^[\w.]+(Error|Exception)\b")
+# Время в начале строки лога: "2026-06-03 20:34:03,424 ..."
+_TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
+
+
+def _error_type(line: str) -> str:
+    """Сигнатура типа ошибки для группировки. Узнаём частые случаи (Gemini 429,
+    нет кредитов Claude, KeyError и т.п.), иначе — общий ярлык."""
+    low = line.lower()
+    if "gemini api 429" in low or "exceeded your current quota" in low:
+        return "Gemini 429 (квота)"
+    if "credit balance is too low" in low:
+        return "Claude: нет кредитов"
+    if "gemini api 5" in low or "service unavailable" in low:
+        return "Gemini 5xx (сбой Google)"
+    m = re.search(r"\b([\w.]+(?:Error|Exception))\b", line)
+    if m:
+        return m.group(1).split(".")[-1]   # KeyError, BadRequestError, …
+    # «… ERROR mila.webapp: Ошибка агента manager …» → берём суть после ERROR
+    m = re.search(r"\bERROR\b\s+([^\n]{0,60})", line)
+    return (m.group(1).strip() if m else "ERROR")[:60]
+
+
+def _ts(line: str) -> str:
+    m = _TS_RE.match(line)
+    return m.group(1) if m else "—"
+
+
+def _aggregate(events: list) -> dict:
+    """Группирует строки-ошибки по типу: count + первое/последнее время."""
+    agg = {}
+    for ln in events:
+        t = _error_type(ln)
+        ts = _ts(ln)
+        a = agg.setdefault(t, {"count": 0, "first": ts, "last": ts})
+        a["count"] += 1
+        if ts != "—":
+            if a["first"] == "—":
+                a["first"] = ts
+            a["last"] = ts
+    return agg
 
 
 def _read_state():
@@ -66,7 +106,7 @@ def _send_telegram(text):
         return False
 
 
-def _record_file(events, exceptions):
+def _record_file(events, exceptions, agg=None):
     path = REPORTS / f"alerts_{datetime.date.today():%Y-%m-%d}.json"
     try:
         existing = json.loads(path.read_text(encoding="utf-8"))
@@ -74,6 +114,7 @@ def _record_file(events, exceptions):
         existing = []
     existing.append({
         "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "by_type": agg or {},          # сводка по типу: count + first/last
         "errors": events, "exceptions": exceptions,
     })
     path.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -98,15 +139,20 @@ def main():
         print("Новых ошибок нет. ✅")
         return
 
-    msg = f"🚨 MILA office: {len(events)} новых ошибок в webapp.log\n\n" + "\n".join(events[-5:])
-    if exceptions:
-        msg += "\n\nИсключения:\n" + "\n".join(exceptions[-5:])
+    # Группируем по типу: вместо спама одинаковыми строками — сводка
+    # «тип × количество, первое/последнее время» (критерий приёмки P1).
+    agg = _aggregate(events)
+    ordered = sorted(agg.items(), key=lambda kv: kv[1]["count"], reverse=True)
+    lines_md = [f"• {t}: ×{a['count']}  ({a['first']} → {a['last']})"
+                for t, a in ordered]
+    msg = (f"🚨 MILA office: {len(events)} новых ошибок в webapp.log, "
+           f"{len(agg)} тип(ов)\n\n" + "\n".join(lines_md))
 
     if _send_telegram(msg):
-        print(f"✅ Отправлено в Telegram: {len(events)} ошибок.")
+        print(f"✅ Отправлено в Telegram: {len(events)} ошибок, {len(agg)} типов.")
     else:
-        path = _record_file(events, exceptions)
-        print(f"⚠️  {len(events)} новых ошибок записаны в {path}")
+        path = _record_file(events, exceptions, agg)
+        print(f"⚠️  {len(events)} новых ошибок ({len(agg)} типов) записаны в {path}")
         print("    (Telegram не настроен — задай TELEGRAM_ALERT_CHAT_ID и токен в tools/.env.)")
     _write_state({"last_count": len(lines)})
 

@@ -552,7 +552,16 @@ def compose_system(key: str, system: str) -> str:
            "  [VERDICT: needs_revision] — нужны правки (вернись к предыдущему этапу)\n" \
            "  [VERDICT: done] — работа завершена, можно публиковать\n" \
            "Пример: 'Всё проверено и отредактировано. [VERDICT: ready_next] [→ rita]'\n" \
-           "VERDICT обязателен для document workflow tracking и помогает системе понять что дальше."
+           "VERDICT обязателен для document workflow tracking и помогает системе понять что дальше.\n\n" \
+           "# ─ Готовый документ для скачивания ─\n" \
+           "Когда ты ВНОСИШЬ ПРАВКИ в текст/документ и выдаёшь его финальную версию, оберни " \
+           "ПОЛНЫЙ исправленный текст (целиком, с уже применёнными правками — не diff, не пересказ) " \
+           "в маркеры:\n" \
+           "  [ДОКУМЕНТ]\n  …весь готовый текст…\n  [/ДОКУМЕНТ]\n" \
+           "Свои комментарии (что и почему изменил, оценка) пиши ВНЕ этих маркеров. " \
+           "Приложение вырежет блок [ДОКУМЕНТ] и предложит пользователю скачать чистый готовый " \
+           "файл — без твоих пометок. Без маркеров скачается транскрипт обсуждения, а не документ. " \
+           "Если правок не вносишь (только отзыв/совет) — маркеры не нужны."
     return out
 
 # ─── AGENT RUNNER ────────────────────────────────────────
@@ -639,10 +648,23 @@ def _parse_retry_after(value: str | None, fallback: float, cap: float = 30.0) ->
 
 def _gemini_generate(contents: list, system: str, tools: list) -> dict:
     require_config("GEMINI_KEY")
+    # gemini-2.5-flash по умолчанию тратит «динамический» бюджет на размышления
+    # (наблюдалось ~1100 thinking-токенов/ответ) — это заметная часть задержки.
+    # Для редактуры/структуры столько рассуждений не нужно: ограничиваем бюджет,
+    # чтобы ответы были быстрее (цель < 5000 мс у Виктории/Риты). Настраивается
+    # MILA_GEMINI_THINKING_BUDGET: 0 — выключить thinking, N>0 — лимит токенов,
+    # -1 (или пусто) — вернуть дефолтное динамическое поведение модели.
+    gen = {"maxOutputTokens": MAX_TOKENS}
+    try:
+        _tb = int(os.getenv("MILA_GEMINI_THINKING_BUDGET", "512"))
+        if _tb >= 0:
+            gen["thinkingConfig"] = {"thinkingBudget": _tb}
+    except ValueError:
+        pass
     payload = {
         "system_instruction": {"parts": [{"text": system}]},
         "contents": contents,
-        "generationConfig": {"maxOutputTokens": MAX_TOKENS},
+        "generationConfig": gen,
     }
     converted_tools = _gemini_tools(tools)
     if converted_tools:

@@ -69,3 +69,9 @@ MILA-BUSINESS/05-analytics/*.json
 
 # webapp Flask secret (CSRF/session) — не коммитить
 mila-office/.secret_key
+
+# Лог активности пользователя (содержит текст запросов) — не коммитить
+logs/user_activity.jsonl
+
+# Временные дампы HTML вебаппа / черновики — не коммитить
+tmp_*.html

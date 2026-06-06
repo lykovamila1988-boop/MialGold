@@ -37,7 +37,7 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 import requests
-from flask import Flask, request, jsonify, redirect, session, Response, abort
+from flask import Flask, request, jsonify, redirect, session, Response, abort, send_file
 
 import base
 import memory  # общая память офиса (профиль/фаза/события) — для дашборда
@@ -54,6 +54,31 @@ logging.basicConfig(
         logging.StreamHandler(),
     ],
 )
+
+
+class _WerkzeugLocalNoiseFilter(logging.Filter):
+    def filter(self, record):
+        if record.name != "werkzeug":
+            return True
+        msg = record.getMessage()
+        # Chrome/DevTools can probe https://localhost while the local app is
+        # intentionally running plain HTTP. Werkzeug logs the TLS handshake bytes
+        # as ERROR 400; it is transport noise, not an application failure.
+        if (
+            "code 400, message Bad request" in msg
+            or "code 400, message Bad HTTP/0.9 request type" in msg
+            or "\x16\x03\x01" in msg
+            or "\\x16\\x03\\x01" in msg
+        ):
+            return False
+        if "GET /.well-known/appspecific/com.chrome.devtools.json" in msg:
+            return False
+        return True
+
+
+for _handler in logging.getLogger().handlers:
+    _handler.addFilter(_WerkzeugLocalNoiseFilter())
+
 logger = logging.getLogger("mila.webapp")
 
 # ─── Реестр агентов ──────────────────────────────────────
@@ -194,6 +219,184 @@ MAX_HISTORY_MSGS = 40    # ~20 последних реплик user/assistant н
 MAX_UPLOADS = 80
 MAX_UPLOAD_BYTES = 12 * 1024 * 1024
 MAX_EXTRACTED_CHARS = 30000
+_DOCUMENTS_DIR = base.MILA_FOLDER / "reports" / "documents"
+_DOCUMENTS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _safe_doc_id(doc_id: str) -> str:
+    doc_id = (doc_id or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{4,80}", doc_id):
+        abort(404)
+    return doc_id
+
+
+def _doc_path(doc_id: str) -> Path:
+    return _DOCUMENTS_DIR / f"{_safe_doc_id(doc_id)}.json"
+
+
+def _doc_export_path(doc_id: str) -> Path:
+    return _DOCUMENTS_DIR / f"{_safe_doc_id(doc_id)}.txt"
+
+
+def _plain_msg_text(item) -> str:
+    if isinstance(item, dict):
+        return str(item.get("content") or item.get("text") or item.get("message") or "")
+    return str(item or "")
+
+
+def _load_document_record(doc_id: str):
+    path = _doc_path(doc_id)
+    if path.exists():
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            logger.exception("document record is unreadable: %s", path)
+    return _document_from_history(doc_id)
+
+
+def _document_from_history(doc_id: str):
+    doc_id = _safe_doc_id(doc_id)
+    hits = []
+    for sid, histories in list(_histories.items()):
+        for agent_key, hist in list((histories or {}).items()):
+            for idx, item in enumerate(hist or []):
+                text = _plain_msg_text(item)
+                if doc_id in text:
+                    prev = _plain_msg_text(hist[idx - 1]) if idx else ""
+                    hits.append({
+                        "agent": agent_key,
+                        "timestamp": datetime.now().isoformat(timespec="seconds"),
+                        "verdict": "done" if "VERDICT: done" in text or "готов" in text.lower() else "ready_next",
+                        "input": prev[-8000:],
+                        "output": text[-20000:],
+                    })
+    if hits:
+        return {
+            "id": doc_id,
+            "file_name": f"mila-document-{doc_id}.txt",
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "status": "ready",
+            "original_content": hits[0].get("input", ""),
+            "stages": hits,
+            "feedback_chain": [],
+        }
+    return {
+        "id": doc_id,
+        "file_name": f"mila-document-{doc_id}.txt",
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "status": "missing_source",
+        "original_content": "",
+        "stages": [{
+            "agent": "office",
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "verdict": "needs_revision",
+            "input": "",
+            "output": (
+                f"Документ {doc_id} был упомянут в чате, но исходный файл не был сохранен "
+                "в реестре документов. Отправьте файл агенту еще раз или скачайте текст "
+                "из сообщения через кнопку в чате."
+            ),
+        }],
+        "feedback_chain": [],
+    }
+
+
+def _save_document_record(doc_id: str, agent_key: str, user_msg: str, reply: str, attachment=None):
+    doc_id = _safe_doc_id(doc_id)
+    now = datetime.now().isoformat(timespec="seconds")
+    doc = _load_document_record(doc_id)
+    if not doc or doc.get("status") == "missing_source":
+        doc = {
+            "id": doc_id,
+            "file_name": f"mila-document-{doc_id}.txt",
+            "created_at": now,
+            "status": "ready",
+            "original_content": (attachment or {}).get("text") or user_msg or "",
+            "stages": [],
+            "feedback_chain": [],
+        }
+    doc["status"] = "ready"
+    # Если агент вернул готовый документ в маркерах — это и есть новый файл на
+    # скачивание; в транскрипт-этап кладём только комментарий (без полотна текста).
+    final = _extract_final_document(reply)
+    stage_output = _strip_doc_block(reply) if final else (reply or "")
+    if final:
+        doc["final_content"] = final
+        doc["final_by"] = agent_key
+        doc["final_at"] = now
+    doc.setdefault("stages", []).append({
+        "agent": agent_key,
+        "timestamp": now,
+        "verdict": "done" if "VERDICT: done" in reply or "готов" in reply.lower() else "ready_next",
+        "input": user_msg or "",
+        "output": stage_output or "",
+    })
+    _doc_path(doc_id).write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
+    _doc_export_path(doc_id).write_text(_document_download_text(doc), encoding="utf-8")
+    return doc
+
+
+def _extract_doc_ids(text: str):
+    text = text or ""
+    ids = set(re.findall(r"\[doc_id:([A-Za-z0-9_-]{4,80})\]", text))
+    ids.update(re.findall(r"/api/document/([A-Za-z0-9_-]{4,80})", text))
+    return sorted(ids)
+
+
+# Маркеры, которыми агент оборачивает ГОТОВЫЙ (уже исправленный) документ — чтобы
+# приложение отдало чистый файл, а не транскрипт обсуждения с комментариями.
+# Конвенция задаётся всем агентам в base.compose_system.
+_DOC_BLOCK_RE = re.compile(r"\[ДОКУМЕНТ\](.*?)\[/ДОКУМЕНТ\]", re.S | re.I)
+
+
+def _extract_final_document(reply: str):
+    """Чистый исправленный текст документа из ответа агента, либо None."""
+    if not reply:
+        return None
+    m = _DOC_BLOCK_RE.search(reply)
+    if not m:
+        return None
+    return m.group(1).strip() or None
+
+
+def _strip_doc_block(reply: str) -> str:
+    """Убирает блок [ДОКУМЕНТ]…[/ДОКУМЕНТ] из видимого в чате текста: сам документ
+    уезжает в скачиваемый файл, в чате остаётся только комментарий агента."""
+    if not reply:
+        return reply
+    return _DOC_BLOCK_RE.sub("", reply).strip()
+
+
+def _document_download_text(doc: dict) -> str:
+    """Текст для скачивания. Если агент пометил готовый документ — отдаём ЧИСТЫЙ
+    исправленный документ; иначе (старый сценарий) — полный транскрипт этапов."""
+    final = (doc or {}).get("final_content")
+    if final:
+        return final.strip() + "\n"
+    return _document_to_text(doc)
+
+
+def _document_to_text(doc: dict) -> str:
+    lines = [
+        f"MILA OFFICE DOCUMENT: {doc.get('id', '')}",
+        f"Статус: {doc.get('status', '')}",
+        f"Создан: {doc.get('created_at', '')}",
+        "",
+    ]
+    original = doc.get("original_content") or ""
+    if original:
+        lines += ["ИСХОДНЫЙ МАТЕРИАЛ", original, ""]
+    for idx, stage in enumerate(doc.get("stages") or [], 1):
+        lines += [
+            f"ЭТАП {idx}: {stage.get('agent', '')} / {stage.get('verdict', '')}",
+            f"Время: {stage.get('timestamp', '')}",
+        ]
+        if stage.get("input"):
+            lines += ["", "Вход:", stage.get("input", "")]
+        if stage.get("output"):
+            lines += ["", "Результат:", stage.get("output", "")]
+        lines.append("")
+    return "\n".join(lines).strip() + "\n"
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_BYTES
@@ -221,6 +424,17 @@ app.config.update(
     SESSION_COOKIE_SAMESITE="Lax",
     SESSION_COOKIE_SECURE=os.getenv("MILA_HTTPS", "").lower() in ("1", "true", "yes"),
 )
+
+
+@app.after_request
+def _clear_hsts(resp):
+    """Когда приложение на HTTP (MILA_HTTPS=0), явно гасим HSTS, чтобы браузер,
+    запомнивший https с прошлого MILA_HTTPS=1, не упирался в TLS-на-HTTP-порт
+    (поток '400 Bad request version', страница/агенты не грузятся). max-age=0
+    сбрасывает закэшированную политику. На самом https это не отправляется."""
+    if not _HTTPS:
+        resp.headers["Strict-Transport-Security"] = "max-age=0"
+    return resp
 
 
 def _session_id():
@@ -290,6 +504,24 @@ def _decode_text_file(raw: bytes) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
+def _looks_garbled(text: str) -> bool:
+    """Эвристика «битый текстовый слой» (типично для PDF из GAMMA с subset-шрифтами
+    без корректного ToUnicode): в извлечённом тексте кириллические слова перемешаны
+    с цифрами/латиницей ВНУТРИ слова — «Поч<G», «6ы5иD4N», «A989?O@». В нормальном
+    русском тексте такого почти не бывает (исключения вроде «30-дневная» редки)."""
+    tokens = re.findall(r"\S+", text or "")
+    cyr_tokens = mixed = 0
+    for t in tokens:
+        if not re.search(r"[а-яёА-ЯЁ]", t):
+            continue  # чисто латинские/числовые токены (@liudmyla, 1–7) не считаем
+        cyr_tokens += 1
+        if re.search(r"[A-Za-z0-9]", t):  # цифра/латиница внутри слова с кириллицей
+            mixed += 1
+    if cyr_tokens < 10:
+        return False  # слишком мало данных, чтобы судить
+    return (mixed / cyr_tokens) > 0.30
+
+
 def _extract_pdf_text(raw: bytes) -> tuple[str, str]:
     import io
     try:
@@ -307,6 +539,21 @@ def _extract_pdf_text(raw: bytes) -> tuple[str, str]:
         text = "\n\n".join(pages).strip()
         if not text:
             return "", "PDF загружен, но текст не найден. Возможно, это скан; загрузи картинку или установи OCR."
+        if _looks_garbled(text):
+            # Не скармливаем агенту кашу как «содержимое» — он не сможет оценить.
+            # Отдаём честное объяснение + короткий образец, чтобы был виден характер сбоя.
+            note = (
+                "⚠️ Текстовый слой этого PDF повреждён (похоже на экспорт из GAMMA с "
+                "subset-шрифтами без ToUnicode): при извлечении получается нечитаемая "
+                "кодировочная каша, оценивать её бессмысленно.\n"
+                "Что делать: пришли воркбук как Markdown/.docx или текстом — тогда "
+                "редактор сможет оценить содержание. Сам PDF визуально в порядке, "
+                "ломается только машинно извлекаемый текст.\n\n"
+                "Образец того, что извлеклось (для наглядности):\n"
+                + text[:400]
+            )
+            return note, ("Битый текстовый слой PDF — прислан образец вместо содержимого. "
+                          "Загрузи Markdown/.docx/текст для оценки.")
         return text, ""
     except Exception as e:
         return "", f"Не удалось прочитать PDF: {type(e).__name__}"
@@ -443,13 +690,34 @@ def _set_job(job_id, value):
             _jobs.popitem(last=False)
 
 
+_ACTIVITY_LOG = base.MILA_FOLDER / "logs" / "user_activity.jsonl"
+
+
+def _log_activity(rec: dict):
+    """Пишет одно событие активности пользователя (JSONL) для анализа Стасом.
+    Лог в .gitignore — содержит текст запросов. Не путать с session-notes клиентов:
+    это запросы Людмилы к агентам офиса."""
+    try:
+        _ACTIVITY_LOG.parent.mkdir(parents=True, exist_ok=True)
+        rec["ts"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(_ACTIVITY_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception:
+        pass  # логирование активности не должно ронять чат
+
+
 def _run_job(job_id, sid, key, msg, attachment=None):
     """Выполняется в фоновом потоке: вызывает агента, обновляет историю и job."""
+    import time as _t
+    _t0 = _t.time()
     try:
         with _locks[key]:  # сериализуем вызовы одного агента; разные агенты идут параллельно
             histories = _session_histories(sid)
             reply, new_hist = AGENTS[key]["responder"](msg, histories[key])
             histories[key] = _trim(new_hist)
+        _log_activity({"agent": key, "message": (msg or "")[:1000],
+                       "msg_len": len(msg or ""), "has_attachment": bool(attachment),
+                       "response_ms": int((_t.time() - _t0) * 1000), "ok": True})
         # Парсим VERDICT и очищаем его из видимого текста
         verdict = "ready_next"  # default
         reply_clean = reply
@@ -470,10 +738,33 @@ def _run_job(job_id, sid, key, msg, attachment=None):
                 doc_id = result.get("doc_id")
                 attachment["_doc_id"] = doc_id
             memory.add_workflow_stage(doc_id, agent=key, input_text=msg, output_text=reply_clean, verdict=verdict)
+            try:
+                _save_document_record(doc_id, key, msg, reply_clean, attachment)
+            except Exception:
+                logger.exception("could not save document record: %s", doc_id)
 
-        _set_job(job_id, {"status": "done", "sid": sid, "reply": reply_clean, "doc_id": doc_id, "verdict": verdict})
-    except Exception:
+        for mentioned_doc_id in _extract_doc_ids(reply_clean):
+            try:
+                _save_document_record(mentioned_doc_id, key, msg, reply_clean, attachment)
+            except Exception:
+                logger.exception("could not save mentioned document record: %s", mentioned_doc_id)
+
+        # Агент вернул готовый документ в маркерах → в чат отдаём комментарий без
+        # полотна текста + кнопку скачать чистый файл (через [doc_id:…]).
+        visible = reply_clean
+        if _extract_final_document(reply_clean):
+            visible = _strip_doc_block(reply_clean)
+            if doc_id and doc_id not in visible:
+                visible = (visible + "\n\n📄 Готовый документ с правками — кнопкой ниже."
+                           f"\n[doc_id:{doc_id}]").strip()
+
+        _set_job(job_id, {"status": "done", "sid": sid, "reply": visible, "doc_id": doc_id, "verdict": verdict})
+    except Exception as e:
         logger.exception("Ошибка агента %s (job %s)", key, job_id)
+        _log_activity({"agent": key, "message": (msg or "")[:1000],
+                       "msg_len": len(msg or ""), "has_attachment": bool(attachment),
+                       "response_ms": int((_t.time() - _t0) * 1000),
+                       "ok": False, "error": str(e)[:120]})
         _set_job(job_id, {"status": "done", "sid": sid, "error": "Внутренняя ошибка — см. логи (logs/webapp.log)"})
 
 
@@ -567,11 +858,16 @@ def chat():
                 f"{attachment.get('text', '')}"
             )
         else:
+            warn = attachment.get("warning") or ""
+            warn_block = f"⚠️ Предупреждение при чтении файла: {warn}\n\n" if warn else ""
             msg = (
                 f"{ask}\n\n"
                 f"Пользователь загрузил файл: {attachment.get('name')} ({attachment.get('mime')}).\n"
+                f"{warn_block}"
                 "Дай конкретный фидбек на основе содержимого файла: что работает, что улучшить, "
-                "какие правки внести и следующий практический шаг.\n\n"
+                "какие правки внести и следующий практический шаг. Если содержимое не читается "
+                "(битый текстовый слой PDF/каша) — не выдумывай оценку, а честно скажи об этом "
+                "и попроси прислать текстовую версию (Markdown/.docx).\n\n"
                 "--- Содержимое / описание файла ---\n"
                 f"{attachment.get('text', '')}"
             )
@@ -597,6 +893,29 @@ def result():
         return jsonify({"status": "pending"})
     # Готово: либо reply, либо error — фронтенд рендерит как раньше.
     return jsonify({k: v for k, v in job.items() if k != "status"})
+
+
+@app.get("/api/document/<doc_id>/download")
+def api_document_download_text(doc_id):
+    doc = _load_document_record(doc_id)
+    if doc.get("status") == "missing_source":
+        abort(404)
+    # Всегда регенерируем из актуальной записи — чтобы отдать последнюю чистую
+    # версию (final_content), а не закэшированный транскрипт.
+    path = _doc_export_path(doc_id)
+    path.write_text(_document_download_text(doc), encoding="utf-8")
+    # Если есть готовый документ — имя «mila-готовый-…», иначе прежнее имя.
+    name = doc.get("file_name") or f"mila-document-{_safe_doc_id(doc_id)}.txt"
+    if doc.get("final_content"):
+        name = f"mila-готовый-{_safe_doc_id(doc_id)}.txt"
+    return send_file(
+        path,
+        mimetype="text/plain; charset=utf-8",
+        as_attachment=True,
+        download_name=name,
+    )
+
+
 
 
 @app.post("/api/reset")
@@ -1518,6 +1837,11 @@ INDEX_HTML = r"""<!DOCTYPE html>
   #send{width:46px;height:46px;border-radius:50%;border:none;background:var(--t);color:#fff;font-size:18px;cursor:pointer;flex-shrink:0}
   #send:disabled{opacity:.4;cursor:default}
   .hint{text-align:center;font-size:11px;color:var(--u);margin-top:8px}
+  .docLinkRow{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+  .docLinkBtn{border:1px solid var(--b);background:var(--w);color:var(--n);border-radius:8px;padding:7px 12px;
+    font-size:12px;font-family:inherit;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;gap:6px}
+  .docLinkBtn.primary{background:var(--t);border-color:var(--t);color:#fff;font-weight:bold}
+  .docLinkBtn:hover{filter:brightness(.98);border-color:var(--t)}
 
   /* Document modal styles */
   #docModal{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.5);z-index:100;align-items:center;justify-content:center}
@@ -1618,17 +1942,166 @@ async function postJSON(url, payload){
   return r;
 }
 
-function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+
+// ─── Download & Modal Functions (must be defined early) ───
+window.showDownloadPopup = function(content){
+  document.getElementById('downloadPopup').style.display='block';
+  document.getElementById('downloadOverlay').style.display='block';
+  window.pendingDownloadContent = content;
+};
+
+window.closeDownloadPopup = function(){
+  document.getElementById('downloadPopup').style.display='none';
+  document.getElementById('downloadOverlay').style.display='none';
+  window.pendingDownloadContent = null;
+};
+
+window.downloadWorkbookTXT = async function(){
+  console.log('🔍 downloadWorkbookTXT вызвана');
+  // Если документ зарегистрирован на сервере — скачиваем ЧИСТУЮ финальную версию
+  // (с применёнными правками), а не обёртку вокруг текста реплики.
+  if(currentDocId){
+    try{
+      const resp=await fetch('/api/document/'+encodeURIComponent(currentDocId)+'/download');
+      if(resp.ok){
+        const blob=await resp.blob();
+        const cd=resp.headers.get('Content-Disposition')||'';
+        const m=cd.match(/filename\*?=(?:UTF-8'')?"?([^\";]+)"?/i);
+        const filename=m?decodeURIComponent(m[1]):('mila-готовый-'+currentDocId+'.txt');
+        const url=URL.createObjectURL(blob);
+        const a=document.createElement('a');
+        a.href=url; a.download=filename; document.body.appendChild(a);
+        a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
+        setTimeout(()=>closeDownloadPopup(),300);
+        return;
+      }
+    }catch(e){ console.warn('Серверное скачивание не удалось, фолбэк на текст реплики', e); }
+  }
+  console.log('📦 pendingDownloadContent:', window.pendingDownloadContent?.substring(0,50));
+
+  if(!window.pendingDownloadContent) {
+    const bubbles=Array.from(document.querySelectorAll('.bubble,.docStage,.card'));
+    const source=bubbles.reverse().find(el=>{
+      const t=el.innerText||'';
+      return t.includes('ФИНАЛЬНЫЙ ЧЕК-ЛИСТ') || t.includes('Готово к загрузке') || t.includes('Скачать воркбук');
+    }) || document.querySelector('.bubble:last-child');
+    window.pendingDownloadContent = source ? (source.innerText||'').replace(/Скачать воркбук\s*\(TXT\)/g,'').trim() : '';
+    console.log('📍 Извлечено из DOM:', window.pendingDownloadContent?.substring(0,50));
+  }
+  if(!window.pendingDownloadContent) {
+    window.pendingDownloadContent = 'Финальный чек-лист перед публикацией\n\nДокумент готов к загрузке в GAMMA.';
+  }
+  if(!window.pendingDownloadContent) {
+    alert('Нет содержимого для скачивания');
+    return;
+  }
+
+  try {
+    const timestamp = new Date().toLocaleString('ru-RU');
+    const filename = 'workbook_approved_' + new Date().toISOString().split('T')[0] + '.txt';
+    const txtContent = `════════════════════════════════════════════════════════════
+ОДОБРЕННЫЙ ВОРКБУК
+════════════════════════════════════════════════════════════
+
+Дата одобрения: ${timestamp}
+Статус: ✓ ОДОБРЕН (VERDICT: done)
+Агент: Victoria (редактор)
+
+════════════════════════════════════════════════════════════
+
+СОДЕРЖИМОЕ:
+
+${window.pendingDownloadContent}
+
+════════════════════════════════════════════════════════════
+
+Готово к:
+✓ Загрузке в GAMMA (gamma.app)
+✓ Отправке Marina для переформатирования
+✓ Печати и распространению
+
+════════════════════════════════════════════════════════════`;
+
+    const blob = new Blob([txtContent], {type: 'text/plain; charset=utf-8'});
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    link.style.display = 'none';
+    document.body.appendChild(link);
+    console.log('✅ Запускаю скачивание:', filename);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+    alert('✅ Файл скачан: ' + filename);
+    setTimeout(() => closeDownloadPopup(), 500);
+  } catch(e) {
+    console.error('❌ Ошибка при скачивании:', e);
+    alert('Ошибка при скачивании: ' + e.message);
+  }
+};
+
+window.openDocModal = async function(docId){
+  const safe=String(docId||currentDocId||'').replace(/[^A-Za-z0-9_-]/g,'');
+  if(!safe){ alert('История документа пока недоступна: документ не выбран.'); return; }
+  try{
+    const resp=await fetch('/api/document/'+encodeURIComponent(safe));
+    if(!resp.ok) throw new Error('Document not found');
+    const data=await resp.json();
+    if(!data.ok) throw new Error(data.error||'Error loading document');
+    const doc=data.document;
+    currentDocId=safe;
+    saveSessionToStorage();
+    document.getElementById('docTitle').textContent='📄 '+esc(doc.file_name);
+    let html='<div style="margin-bottom:16px"><strong>Создан:</strong> '+esc(new Date(doc.created_at).toLocaleString('ru-RU'))+'<br><strong>Статус:</strong> '+esc(doc.status)+'</div>';
+    html+='<div style="margin-bottom:16px;padding:12px;background:#F5F5F5;border-radius:6px;font-size:12px"><strong>Исходный материал:</strong><br>'+esc(doc.original_content||'[нет содержимого]')+'</div>';
+    html+='<h3 style="margin:20px 0 12px;font-size:16px">История обработки</h3>';
+    (doc.stages||[]).forEach((stage,idx)=>{
+      const names={'victoria':'Виктория','rita':'Рита','marina':'Марина','lera':'Лера','producer':'Продюсер','manager':'Менеджер','vasya':'Вася','dima':'Дима','tyoma':'Тёма','olya':'Оля','alina':'Алина'};
+      html+='<div class="docStage"><div class="agent">'+idx+'. '+esc(names[stage.agent]||stage.agent)+'<span class="verdict '+esc(stage.verdict)+'">'+esc(stage.verdict)+'</span></div>';
+      html+='<div class="time">'+esc(new Date(stage.timestamp).toLocaleString('ru-RU'))+'</div>';
+      if(stage.input) html+='<div style="margin-top:8px"><strong>Исходный текст:</strong><div class="content">'+esc(stage.input)+'</div></div>';
+      if(stage.output) html+='<div style="margin-top:8px"><strong>Результат:</strong><div class="content">'+esc(stage.output)+'</div></div>';
+      html+='</div>';
+    });
+    document.getElementById('docDetails').innerHTML=html;
+    if(doc.feedback_chain && doc.feedback_chain.length){
+      let fbHtml='<h3 style="margin:20px 0 12px;font-size:16px">Правки и комментарии</h3>';
+      (doc.feedback_chain||[]).forEach((fb)=>{
+        const names={'victoria':'Виктория','rita':'Рита','marina':'Марина','lera':'Лера','producer':'Продюсер','manager':'Менеджер','vasya':'Вася','dima':'Дима','tyoma':'Тёма','olya':'Оля','alina':'Алина'};
+        fbHtml+='<div class="docStage"><div class="agent">'+esc(names[fb.from_agent]||fb.from_agent)+' → '+esc(names[fb.to_agent]||fb.to_agent)+'</div>';
+        fbHtml+='<div class="time">'+esc(new Date(fb.timestamp).toLocaleString('ru-RU'))+'</div>';
+        fbHtml+='<div class="content">'+esc(fb.feedback)+'</div></div>';
+      });
+      document.getElementById('feedbackChain').innerHTML=fbHtml;
+    }
+    document.getElementById('docModal').classList.add('show');
+  }catch(e){
+    alert('Ошибка: '+e.message);
+  }
+};
+
 // #RRGGBB + alpha → rgba(...) для полупрозрачного фона пилюль-команд в тултипе.
 function hexA(hex,a){const h=(hex||'#888').replace('#','');
   const r=parseInt(h.substr(0,2),16),g=parseInt(h.substr(2,2),16),b=parseInt(h.substr(4,2),16);
   return 'rgba('+r+','+g+','+b+','+a+')';}
 function md(s){
   s=esc(s);
+  s=s.replace(/\[doc_id:([A-Za-z0-9_-]{4,80})\]/g,function(_,id){return docButtons(id);});
+  s=s.replace(/(^|\s)\/api\/document\/([A-Za-z0-9_-]{4,80})(?!\/[A-Za-z])/g,function(_,lead,id){return lead+docButtons(id);});
   s=s.replace(/\*\*([^*]+)\*\*/g,'<b>$1</b>');
   s=s.replace(/`([^`]+)`/g,'<code>$1</code>');
   s=s.replace(/(^|\n)\s*[-•]\s+/g,'$1• ');
   return s;
+}
+function docButtons(id){
+  const safe=String(id||'').replace(/[^A-Za-z0-9_-]/g,'');
+  if(!safe) return '';
+  return '<span class="docLinkRow" data-doc-id="'+safe+'">'
+    +'<button class="docLinkBtn primary" onclick="downloadDoc(event,\''+safe+'\')">Скачать документ</button>'
+    +'<button class="docLinkBtn" onclick="openDocModal(\''+safe+'\')">История</button>'
+    +'</span>';
 }
 function agent(){return AGENTS.find(a=>a.key===cur);}
 
@@ -1694,15 +2167,44 @@ const NEXT_ACTIONS={
   ]
 };
 
+function showAutoSuggestion(fromAgent, nextAction){
+  // Показываем явное предложение перейти к следующему агенту
+  const a=AGENTS.find(x=>x.key===fromAgent);
+  const b=AGENTS.find(x=>x.key===nextAction.agent);
+  if(!a||!b) return;
+
+  setTimeout(()=>{
+    const suggestion=document.createElement('div');
+    suggestion.style.cssText='position:fixed;bottom:100px;right:20px;background:linear-gradient(135deg,'+a.color+' 0%,'+b.color+' 100%);color:#fff;padding:16px 20px;border-radius:12px;box-shadow:0 8px 24px rgba(0,0,0,.2);z-index:45;max-width:280px;font-size:13px;line-height:1.5;cursor:pointer;transition:transform 0.2s';
+    suggestion.innerHTML=`
+<div style="font-weight:bold;margin-bottom:8px">💡 Рекомендуемый следующий шаг</div>
+<div style="margin-bottom:12px">${a.emoji} ${a.name} → ${b.emoji} <strong>${nextAction.label}</strong></div>
+<div style="font-size:11px;opacity:0.9;margin-bottom:8px">${nextAction.desc||''}</div>
+<button onclick="this.parentElement.remove()" style="background:rgba(255,255,255,.2);color:#fff;border:1px solid rgba(255,255,255,.3);padding:6px 12px;border-radius:6px;font-size:11px;cursor:pointer;width:100%">Использовать →</button>
+    `;
+    suggestion.onclick=(e)=>{ if(e.target.tagName==='BUTTON') runNextAction(nextAction,''); };
+    document.body.appendChild(suggestion);
+
+    // Автоматически удаляем через 10 сек
+    setTimeout(()=>{ if(suggestion.parentElement) suggestion.remove(); }, 10000);
+  }, 400);
+}
+
 function nextActionsFor(agentKey, verdict){
   // Условные actions: если needs_revision — вернуться к предыдущему, иначе обычные next actions
   if(verdict==='needs_revision'){
     // Для needs_revision показываем кнопку "вернуть с комментарием"
-    // На данный момент просто показываем обычные actions, но с пометкой
     const actions=(NEXT_ACTIONS[agentKey]||NEXT_ACTIONS.default).slice(0,3);
     return [{label:'Отправить с комментариями обратно',agent:agentKey,prompt:'Дай детальный комментарий к предыдущему этапу и предложи конкретные исправления.',desc:'Вернуться с правками'},...actions];
   }
-  return (NEXT_ACTIONS[agentKey]||NEXT_ACTIONS.default).slice(0,3);
+  const actions = (NEXT_ACTIONS[agentKey]||NEXT_ACTIONS.default).slice(0,3);
+
+  // Для ready_next добавляем явное предложение выбрать рекомендуемый агент
+  if(verdict==='ready_next' && actions.length > 0){
+    showAutoSuggestion(agentKey, actions[0]);
+  }
+
+  return actions;
 }
 
 // UI-переписка по агенту: {agentKey: [{text, me}, ...]}. Бэкенд хранит свою
@@ -1712,6 +2214,8 @@ const TRANSCRIPTS = {};
 
 // Рисует один пузырь в DOM (без записи в стор).
 function drawMsg(text, me, actions, verdict){
+  text = (text && typeof text === 'object') ? (text.text || text.content || text.message || JSON.stringify(text)) : String(text==null?'':text);
+  actions = Array.isArray(actions) ? actions : [];
   const chat=document.getElementById('chat');
   const a=agent();
   const row=document.createElement('div'); row.className='row'+(me?' me':'');
@@ -1741,10 +2245,21 @@ function drawMsg(text, me, actions, verdict){
   }
 
   if(!me && actions && actions.length){
+    const hint=document.createElement('div');
+    hint.style.cssText='margin-top:12px;margin-bottom:6px;font-size:11px;color:#7A5E54;text-transform:uppercase;letter-spacing:0.5px;font-weight:bold';
+    hint.textContent='📋 Следующий шаг:';
+    b.appendChild(hint);
+
     const wrap=document.createElement('div'); wrap.className='next-actions';
-    actions.forEach((act)=>{
+    wrap.style.cssText='display:flex;flex-wrap:wrap;gap:6px;margin-top:8px';
+    actions.forEach((act, idx)=>{
       const btn=document.createElement('button'); btn.type='button'; btn.textContent=act.label;
       if(act.desc) btn.title=act.desc;
+      if(idx===0){
+        btn.style.cssText='background:var(--t);color:#fff;border:none;border-radius:6px;padding:8px 12px;font-size:13px;cursor:pointer;font-weight:bold;flex:1;min-width:140px';
+      }else{
+        btn.style.cssText='background:#E0D0C8;color:var(--n);border:none;border-radius:6px;padding:8px 12px;font-size:12px;cursor:pointer;flex:0.8;min-width:100px';
+      }
       if(recommendedAgent && act.agent===recommendedAgent) {
         btn.style.outline='2px solid var(--t)'; btn.style.outlineOffset='2px';
       }
@@ -1760,6 +2275,7 @@ function drawMsg(text, me, actions, verdict){
 // Добавляет сообщение и в стор текущего агента, и на экран.
 // Очищает [→ agent] подсказку перед сохранением.
 function addMsg(text, me, actions, verdict){
+  text = (text && typeof text === 'object') ? (text.text || text.content || text.message || JSON.stringify(text)) : String(text==null?'':text);
   const savedActions=actions||[];
   const cleanText=text.replace(/\s*\[→\s*\w+\]\s*$/, '');
 
@@ -1840,7 +2356,21 @@ async function renderAgent(){
 
   try {
     const a = agent();
-    document.getElementById('hname').textContent = a.name + ' — ' + a.role;
+    let titleText = a.name + ' — ' + a.role;
+    if(currentDocId) titleText += ' · 📄 ' + currentDocId.substring(0,6) + '...';
+    document.getElementById('hname').textContent = titleText;
+
+    // Показываем кнопку просмотра документа если есть currentDocId
+    const docBtn = document.getElementById('docViewBtn');
+    if(docBtn) {
+      if(currentDocId) {
+        docBtn.style.display = 'block';
+        docBtn.onclick = () => openDocModal(currentDocId);
+      } else {
+        docBtn.style.display = 'none';
+      }
+    }
+
     const hav = document.getElementById('hav');
     hav.textContent = a.emoji;
     hav.style.background = a.color;
@@ -1883,10 +2413,33 @@ async function renderAgent(){
       }
     }
 
+    if(hist && !Array.isArray(hist)) {
+      hist = Object.values(hist).filter(Boolean);
+      TRANSCRIPTS[cur] = hist;
+    }
     if (hist && hist.length) {
-      hist.forEach(m => drawMsg(m.text, m.me, m.actions, m.verdict));
+      hist.forEach(m => {
+        try{
+          const item = (m && typeof m === 'object') ? m : {text:String(m||''), me:false};
+          drawMsg(item.text, !!item.me, item.actions||[], item.verdict);
+        }catch(e){
+          console.error('Could not render restored message:', e, m);
+        }
+      });
     } else {
       drawMsg(a.intro, false);
+    }
+  } catch(e) {
+    console.error('renderAgent failed:', e);
+    const chat = document.getElementById('chat');
+    if(chat){
+      chat.innerHTML = '';
+      const row=document.createElement('div'); row.className='row';
+      const av=document.createElement('div'); av.className='av'; av.textContent='!';
+      av.style.background='#A8412C';
+      const b=document.createElement('div'); b.className='bubble';
+      b.innerHTML='Не удалось восстановить старую переписку. <button class="docLinkBtn primary" onclick="resetChat()">Очистить этот чат</button>';
+      row.appendChild(av); row.appendChild(b); chat.appendChild(row);
     }
   } finally {
     activeLoadAgent = null;
@@ -1971,11 +2524,77 @@ async function send(){
         }
         const verdict=d.verdict||'ready_next';
         addMsg(d.reply,false,nextActionsFor(cur, verdict), verdict);
+
+        // Показываем попап для скачивания если Victoria одобрила (done)
+        if(verdict==='done' && cur==='victoria'){
+          setTimeout(()=>{
+            showDownloadPopup(d.reply);
+          }, 600);
+        }
+
+        // Добавляем финальный чек-лист если Victoria одобрила (done)
+        if(verdict==='done' && cur==='victoria' && currentDocId){
+          setTimeout(()=>{
+            // Очищаем VERDICT и другие теги из контента
+            const cleanContent=d.reply.replace(/\[VERDICT:\s*\w+\]/g, '').replace(/\s*\[→\s*\w+\]\s*$/g, '').trim();
+            window.pendingDownloadContent=cleanContent;
+            console.log('✅ Сохранено для скачивания:', cleanContent.substring(0,100)+'...');
+
+            const downloadBtn='<div style="margin-top:16px;display:flex;gap:8px"><button onclick="downloadWorkbookTXT()" style="background:#C46148;color:#fff;border:none;border-radius:8px;padding:12px 24px;font-size:14px;font-family:inherit;cursor:pointer;font-weight:bold;flex:1">📥 Скачать TXT</button><button onclick="openDocModal(\''+currentDocId+'\')" style="background:#4A7A5E;color:#fff;border:none;border-radius:8px;padding:12px 24px;font-size:14px;font-family:inherit;cursor:pointer;font-weight:bold;flex:1">📄 История</button></div>';
+            const checklist=`
+✅ ФИНАЛЬНЫЙ ЧЕК-ЛИСТ ПЕРЕД ПУБЛИКАЦИЕЙ
+
+☑ Содержимое одобрено финальным редактором
+☑ Голос и тон соответствуют бренду
+☑ Все CTA работают и направляют в воронку
+☑ Нет запрещённых формулировок
+☑ Дизайн готов к GAMMA (или другой платформе)
+☑ Метаданные заполнены (заголовок, описание, теги)
+☑ Тестовая публикация пройдена
+☑ Ссылка на купить/консультацию активна
+
+🎯 Готово к загрузке в GAMMA
+            `;
+            const chat=document.getElementById('chat');
+            const row=document.createElement('div'); row.className='row';
+            const av=document.createElement('div'); av.className='av'; av.style.background=agent().color; av.textContent=agent().emoji;
+            const b=document.createElement('div'); b.className='bubble'; b.innerHTML=md(checklist.trim())+downloadBtn;
+            row.appendChild(av); row.appendChild(b); chat.appendChild(row);
+            chat.scrollTop=chat.scrollHeight;
+          }, 1200);
+        }
       }
     }
   }catch(e){ addMsg('⚠️ Сеть недоступна: '+e,false); }
   t.style.display='none'; document.getElementById('send').disabled=false; inp.focus();
 }
+
+async function openDocModal(docId){
+  const safe=String(docId||currentDocId||'').replace(/[^A-Za-z0-9_-]/g,'');
+  if(!safe){ alert('История документа пока недоступна: документ не выбран.'); return; }
+  currentDocId=safe;
+  saveSessionToStorage();
+  try{
+    const r=await fetch('/api/document/'+encodeURIComponent(safe));
+    if(!r.ok) throw new Error('Документ не найден');
+    const d=await r.json();
+    const doc=d.document||d;
+    const lines=[];
+    if(doc.file_name) lines.push('Документ: '+doc.file_name);
+    if(doc.status) lines.push('Статус: '+doc.status);
+    if(doc.created_at) lines.push('Создан: '+rel(doc.created_at));
+    if(doc.original_content) lines.push('\\nИсходный материал:\\n'+doc.original_content);
+    (doc.stages||[]).forEach((stage,idx)=>{
+      lines.push('\\nШаг '+(idx+1)+': '+(stage.agent||'агент'));
+      if(stage.verdict) lines.push('Вердикт: '+stage.verdict);
+      if(stage.output) lines.push(stage.output);
+    });
+    alert(lines.join('\\n')||('История документа '+safe));
+  }catch(e){
+    alert('История документа '+safe+' пока недоступна.\\n'+e.message);
+  }
+}
+window.openDocModal=openDocModal;
 
 async function resetChat(){
   // Чистит переписку ТОЛЬКО текущего агента (UI + localStorage + server).
@@ -2006,13 +2625,17 @@ async function resetSession(){
   }
 
   // Очищаем UI и localStorage
-  await postJSON('/api/reset',{all:true});
+  try{
+    await postJSON('/api/reset',{all:true});
+  }catch(e){
+    console.warn('Could not reset server session:',e);
+  }
   for(const k in TRANSCRIPTS) delete TRANSCRIPTS[k];
   currentDocId=null;
   localStorage.removeItem('mila_transcripts');
   localStorage.removeItem('mila_current_agent');
   localStorage.removeItem('mila_current_doc_id');
-  renderAgent();
+  location.reload();
 }
 
 // ─── localStorage persistence for session ───
@@ -2689,124 +3312,54 @@ async function load(){
   document.getElementById('events').innerHTML=ev.length?ev.map(e=>'<div class="event">'+esc(e.kind)+'<div class="muted">'+esc(e.ts)+' · '+esc(JSON.stringify(e.payload||{}))+'</div></div>').join(''):'<div class="muted">Событий нет</div>';
 }
 
-// ─── Download popup functions ───
-function showDownloadPopup(content){
-  document.getElementById('downloadPopup').style.display='block';
-  document.getElementById('downloadOverlay').style.display='block';
-  // Store content for download
-  window.pendingDownloadContent = content;
-}
-
-function closeDownloadPopup(){
-  document.getElementById('downloadPopup').style.display='none';
-  document.getElementById('downloadOverlay').style.display='none';
-  window.pendingDownloadContent = null;
-}
-
-function downloadWorkbookTXT(){
-  if(!window.pendingDownloadContent) {
-    alert('Нет содержимого для скачивания');
-    return;
-  }
-
-  // Generate TXT file
-  const timestamp = new Date().toLocaleString('ru-RU');
-  const filename = 'workbook_approved_' + new Date().toISOString().split('T')[0] + '.txt';
-
-  const txtContent = `════════════════════════════════════════════════════════════
-ОДОБРЕННЫЙ ВОРКБУК
-════════════════════════════════════════════════════════════
-
-Дата одобрения: ${timestamp}
-Статус: ✓ ОДОБРЕН (VERDICT: done)
-Агент: Victoria (редактор)
-
-════════════════════════════════════════════════════════════
-
-СОДЕРЖИМОЕ:
-
-${window.pendingDownloadContent}
-
-════════════════════════════════════════════════════════════
-
-Готово к:
-✓ Загрузке в GAMMA (gamma.app)
-✓ Отправке Marina для переформатирования
-✓ Печати и распространению
-
-════════════════════════════════════════════════════════════`;
-
-  // Create blob and download
-  const blob = new Blob([txtContent], {type: 'text/plain; charset=utf-8'});
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-  URL.revokeObjectURL(url);
-
-  // Close popup after download
-  setTimeout(() => closeDownloadPopup(), 500);
-}
+// Download popup functions are defined early in the script
 
 // ─── Document management functions ───
 let currentViewingDocId=null;
 
-async function openDocModal(docId){
-  currentViewingDocId=docId;
-  if(docId) currentDocId=docId;
-  saveSessionToStorage();
-  try{
-    const resp=await fetch('/api/document/'+encodeURIComponent(docId));
-    if(!resp.ok) throw new Error('Document not found');
-    const data=await resp.json();
-    if(!data.ok) throw new Error(data.error||'Error loading document');
-
-    const doc=data.document;
-    document.getElementById('docTitle').textContent='📄 '+esc(doc.file_name);
-
-    let html='<div style="margin-bottom:16px"><strong>Создан:</strong> '+esc(rel(doc.created_at))+'<br><strong>Статус:</strong> '+esc(doc.status)+'</div>';
-    html+='<div style="margin-bottom:16px;padding:12px;background:#F5F5F5;border-radius:6px;font-size:12px"><strong>Исходный материал:</strong><br>'+esc(doc.original_content||'[нет содержимого]')+'</div>';
-    html+='<h3 style="margin:20px 0 12px;font-size:16px">История обработки</h3>';
-
-    (doc.stages||[]).forEach((stage,idx)=>{
-      const names={'victoria':'Виктория','rita':'Рита','marina':'Марина','lera':'Лера',
-        'producer':'Продюсер','manager':'Менеджер','vasya':'Вася','dima':'Дима',
-        'tyoma':'Тёма','olya':'Оля','alina':'Алина'};
-      html+='<div class="docStage">';
-      html+='<div class="agent">'+idx+'. '+esc(names[stage.agent]||stage.agent);
-      html+='<span class="verdict '+esc(stage.verdict)+'">'+esc(stage.verdict)+'</span></div>';
-      html+='<div class="time">'+esc(new Date(stage.timestamp).toLocaleString('ru-RU'))+'</div>';
-      if(stage.input) html+='<div style="margin-top:8px"><strong>Исходный текст:</strong><div class="content">'+esc(stage.input)+'</div></div>';
-      if(stage.output) html+='<div style="margin-top:8px"><strong>Результат:</strong><div class="content">'+esc(stage.output)+'</div></div>';
-      html+='</div>';
-    });
-
-    document.getElementById('docDetails').innerHTML=html;
-
-    // Feedback chain
-    if(doc.feedback_chain && doc.feedback_chain.length){
-      let fbHtml='<h3 style="margin:20px 0 12px;font-size:16px">Правки и комментарии</h3>';
-      (doc.feedback_chain||[]).forEach((fb)=>{
-        const names={'victoria':'Виктория','rita':'Рита','marina':'Марина','lera':'Лера',
-          'producer':'Продюсер','manager':'Менеджер','vasya':'Вася','dima':'Дима',
-          'tyoma':'Тёма','olya':'Оля','alina':'Алина'};
-        fbHtml+='<div class="docStage">';
-        fbHtml+='<div class="agent">'+esc(names[fb.from_agent]||fb.from_agent)+' → '+esc(names[fb.to_agent]||fb.to_agent)+'</div>';
-        fbHtml+='<div class="time">'+esc(new Date(fb.timestamp).toLocaleString('ru-RU'))+'</div>';
-        fbHtml+='<div class="content">'+esc(fb.feedback)+'</div>';
-        fbHtml+='</div>';
-      });
-      document.getElementById('feedbackChain').innerHTML=fbHtml;
-    }
-
-    document.getElementById('docModal').classList.add('show');
-  }catch(e){
-    alert('Ошибка: '+e.message);
+document.addEventListener('click',function(e){
+  const btn=e.target&&e.target.closest?e.target.closest('button,a'):null;
+  if(!btn) return;
+  if(btn.getAttribute('onclick')) return;
+  const txt=(btn.innerText||btn.textContent||'').trim();
+  if(txt.includes('Скачать воркбук') || txt.includes('Скачать TXT')){
+    e.preventDefault();
+    downloadWorkbookTXT();
   }
-}
+});
+
+window.downloadDoc = async function(ev, docId){
+  if(ev) ev.stopPropagation();
+  const safe=String(docId||'').replace(/[^A-Za-z0-9_-]/g,'');
+  if(!safe) return;
+  try{
+    const resp=await fetch('/api/document/'+encodeURIComponent(safe)+'/download');
+    if(!resp.ok) throw new Error('download failed');
+    const blob=await resp.blob();
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement('a');
+    a.href=url;
+    a.download='mila-document-'+safe+'.txt';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }catch(e){
+    const bubble=ev&&ev.target?ev.target.closest('.bubble,.msg,.message'):null;
+    const text=bubble?bubble.innerText:('Документ '+safe);
+    const blob=new Blob([text],{type:'text/plain; charset=utf-8'});
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement('a');
+    a.href=url;
+    a.download='mila-document-'+safe+'.txt';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+};
+
+// openDocModal is defined early in script
 
 function closeDocModal(){
   document.getElementById('docModal').classList.remove('show');
@@ -3025,3 +3578,5 @@ if __name__ == "__main__":
     # для localhost: позволяет валидный https-redirect для Instagram OAuth.
     app.run(host="127.0.0.1", port=5000, debug=False, threaded=True,
             ssl_context="adhoc" if _HTTPS else None)
+
+
