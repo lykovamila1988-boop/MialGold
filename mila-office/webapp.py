@@ -1640,6 +1640,47 @@ def api_approve_all():
     return jsonify({"ok": True, "approved": approved})
 
 
+@app.post("/api/pipeline/publish_due")
+def api_publish_due():
+    """Webhook для n8n: опубликовать все посты которые пора (status=approved и время наступило).
+    Вызывается по расписанию из n8n вместо Windows Task Scheduler.
+    Примеры вызова:
+      curl -X POST http://localhost:5000/api/pipeline/publish_due
+      (из n8n webhook каждый час)
+    """
+    try:
+        # Импортируем publish_due из tools/pipeline.py
+        import sys
+        from pathlib import Path
+        tools_dir = Path(os.getenv("MILA_FOLDER", r"E:\MILA GOLD")) / "tools"
+        if str(tools_dir) not in sys.path:
+            sys.path.insert(0, str(tools_dir))
+
+        import pipeline as tools_pipeline
+
+        # Запускаем publish_due из tools
+        result = tools_pipeline.publish_due()
+
+        logger.info(f"API publish_due: {result}")
+        try:
+            memory.log_event("api:publish_due", {"result": result})
+        except Exception:
+            pass
+
+        return jsonify({
+            "ok": True,
+            "status": "published",
+            "published": result.get("published", 0),
+            "changed": result.get("changed", 0)
+        })
+    except Exception as e:
+        logger.error(f"API publish_due error: {e}", exc_info=True)
+        return jsonify({
+            "ok": False,
+            "error": str(e)
+        }), 500
+
+
 @app.get("/dashboard")
 def dashboard_page():
     return Response(DASHBOARD_HTML, mimetype="text/html")

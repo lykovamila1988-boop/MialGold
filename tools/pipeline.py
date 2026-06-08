@@ -226,7 +226,9 @@ def publish_due():
         changed += 1
     if changed:
         _save_queue(q)
+    result = {"published": published, "changed": changed}
     print(f"📤 Опубликовано: {published}. Обновлено записей: {changed}. (UTC {now:%Y-%m-%d %H:%M})")
+    return result
 
 
 def measure_due(hours=48):
