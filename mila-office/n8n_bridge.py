@@ -50,7 +50,8 @@ _OFFICE_SCRIPTS = {"pipeline.py", "n8n_context.py"}
 _TOOLS_SCRIPTS = {"pipeline.py", "get_analytics.py", "weekly_kpi.py",
                   "weekly_digest.py", "alert_errors.py", "n8n_notify.py",
                   "lead_capture.py", "healthcheck.py", "log_rotate.py",
-                  "gumroad_webhook.py"}
+                  "gumroad_webhook.py", "abandoned_cart_alerts.py",
+                  "reels_recommendations.py"}
 
 app = Flask(__name__)
 
@@ -384,6 +385,37 @@ def gumroad_sale():
     if sig:
         args += ["--signature", sig]
     res = _tools(*args, timeout=60)
+    return jsonify(res), (200 if res.get("ok") else 500)
+
+
+@app.post("/v1/tools/abandoned-alerts")
+def abandoned_alerts():
+    """Алерты о брошенных корзинах и просроченных консультациях.
+    Query params: hours (default 24) — покупки старше N часов, dry_run (boolean)."""
+    err = _auth()
+    if err:
+        return err
+    hours = request.args.get("hours", "24")
+    dry_run = request.args.get("dry_run", "0").lower() in ("1", "true", "yes")
+    args = ["abandoned_cart_alerts.py", "--hours", hours]
+    if dry_run:
+        args.append("--dry-run")
+    res = _tools(*args, timeout=120)
+    return jsonify(res), (200 if res.get("ok") else 500)
+
+
+@app.post("/v1/tools/reels-recommendations")
+def reels_recommendations():
+    """Анализ Reels + AI-рекомендации по контент-плану.
+    Query params: send (boolean) — отправить ли Марине в Telegram."""
+    err = _auth()
+    if err:
+        return err
+    send = request.args.get("send", "0").lower() in ("1", "true", "yes")
+    args = ["reels_recommendations.py"]
+    if send:
+        args.append("--send")
+    res = _tools(*args, timeout=120)
     return jsonify(res), (200 if res.get("ok") else 500)
 
 

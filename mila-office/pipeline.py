@@ -7,6 +7,20 @@ n8n (или человек) вызывает: python pipeline.py <chain> [--noti
 результат каждого следующему, и пишет ход в общую память (memory.py).
 В конце опционально шлёт сигнал в n8n-webhook (Паттерн 2 «агенты → n8n»).
 
+АВТОМАТИЧЕСКИЕ ОТЧЁТЫ (n8n workflow):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+n8n workflow "Fetch Instagram Reports" (каждые 24h или по расписанию):
+  1. POST http://localhost:5000/api/fetch-analytics (type=posts)
+  2. Сохранить reports/posts_YYYY-MM-DD_HHMMSS.json
+  3. Использует tools/get_analytics.py (Instagram Graph API)
+
+Результаты используют:
+  • Rita:  read reports/posts_*.json → analyze_audience()
+  • Olya:  get_weekly_analytics() → read reports/
+  • Dima:  measure_sales_funnel() → correlate с Gumroad
+
+Подробно: см. mila-office/N8N_INSTAGRAM_REPORTS.md
+
 Цепочки:
   new_client      Алина → Лера         (по context.json: новая клиентка)
   content_week    Оля → Марина → Виктория → Вася

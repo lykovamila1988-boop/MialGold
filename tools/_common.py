@@ -314,3 +314,96 @@ def save_report(name, payload):
         n += 1
     path.write_text(body, encoding="utf-8")
     return path
+
+
+def get_consultations(days=30):
+    """Получить завершённые консультации из Calendly API.
+
+    Требует в .env:
+    - CALENDLY_ACCESS_TOKEN: токен доступа Calendly
+    - CALENDLY_EVENT_ID: ID типа события (консультации)
+    - CALENDLY_PRICE: цена консультации ($120 по умолчанию)
+
+    Возвращает список:
+    [
+        {
+            "event_uuid": "...",
+            "start_time": "2026-06-01T10:00:00Z",
+            "end_time": "2026-06-01T11:00:00Z",
+            "status": "completed",
+            "invitees": [{"name": "...", "email": "..."}],
+            "price": 120
+        }
+    ]
+    """
+    load_dotenv(ENV_PATH)
+    calendly_token = os.getenv("CALENDLY_ACCESS_TOKEN", "").strip()
+    calendly_event_id = os.getenv("CALENDLY_EVENT_ID", "").strip()
+    calendly_price = float(os.getenv("CALENDLY_PRICE", "120"))
+
+    if not calendly_token:
+        print("[!] CALENDLY_ACCESS_TOKEN не установлен в .env", file=sys.stderr)
+        return []
+
+    if not calendly_event_id:
+        print("[!] CALENDLY_EVENT_ID не установлен в .env", file=sys.stderr)
+        return []
+
+    try:
+        # Calendly API: https://developer.calendly.com/docs/api/v2/scheduled_events
+        headers = {"Authorization": f"Bearer {calendly_token}"}
+
+        # Получаем все события за последние N дней
+        start_date = (datetime.datetime.utcnow() - datetime.timedelta(days=days)).isoformat()
+        params = {
+            "user": f"https://api.calendly.com/users/me",  # Получим ID юзера сначала
+            "status": "active",  # Только завершённые (обновим после получения юзера)
+            "min_start_time": f"{start_date}Z",
+        }
+
+        # Сначала получаем ID пользователя
+        r = _session.get("https://api.calendly.com/users/me",
+                        headers=headers, timeout=30)
+        if r.status_code != 200:
+            print(f"[!] Calendly error: {r.status_code} - {r.text}", file=sys.stderr)
+            return []
+
+        user_id = r.json()["resource"]["uri"]
+
+        # Затем получаем события этого юзера
+        params["user"] = user_id
+        r = _session.get("https://api.calendly.com/scheduled_events",
+                        headers=headers, params=params, timeout=30)
+
+        if r.status_code != 200:
+            print(f"[!] Calendly error: {r.status_code} - {r.text}", file=sys.stderr)
+            return []
+
+        events = r.json().get("collection", [])
+        consultations = []
+
+        for event in events:
+            # Фильтруем только события нужного типа (консультации)
+            if calendly_event_id not in event.get("event_type", ""):
+                continue
+
+            # Только завершённые события
+            if event.get("status") != "active":
+                continue
+
+            consultation = {
+                "event_uuid": event.get("uuid"),
+                "start_time": event.get("start_time"),
+                "end_time": event.get("end_time"),
+                "status": "completed",
+                "invitees": event.get("invitees", []),
+                "price": calendly_price,
+                "duration_minutes": event.get("duration_minutes", 60),
+            }
+            consultations.append(consultation)
+
+        return consultations
+
+    except Exception as e:
+        print(f"[!] Ошибка при получении консультаций из Calendly: {e}", file=sys.stderr)
+        return []

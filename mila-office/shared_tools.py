@@ -83,51 +83,107 @@ def telegram_channel_stats(chat_id):
 
 
 def calc_ltv_and_mrr():
-    """Рассчитать LTV (lifetime value) и MRR (monthly recurring revenue) из Gumroad (для Dima).
-    LTV = средний доход на одного клиента. MRR = среднемесячный доход."""
+    """Рассчитать LTV (lifetime value) и MRR (monthly recurring revenue) из Gumroad + Calendly консультаций.
+    LTV = средний доход на одного клиента. MRR = среднемесячный доход.
+
+    Источники дохода:
+    1. Gumroad: практикум ($37)
+    2. Calendly: консультации ($120)
+    """
     try:
+        from pathlib import Path
+        import sys
+
+        # Импортируем get_consultations из tools/_common
+        tools_dir = Path(os.getenv("MILA_FOLDER", r"E:\MILA GOLD")) / "tools"
+        if str(tools_dir) not in sys.path:
+            sys.path.insert(0, str(tools_dir))
+
+        # Получаем данные продаж и консультаций
         sales_response = gumroad_sales(limit=100)
         if isinstance(sales_response, str) and sales_response.startswith("⚠️"):
-            return sales_response
+            sales_data = []
+        else:
+            try:
+                sales_data = json.loads(sales_response)
+                if isinstance(sales_data, str):
+                    sales_data = json.loads(sales_data)
+                if not isinstance(sales_data, list):
+                    sales_data = sales_data.get("sales", []) if isinstance(sales_data, dict) else []
+            except:
+                sales_data = []
 
-        sales_data = json.loads(sales_response)
-        if isinstance(sales_data, str):
-            sales_data = json.loads(sales_data)
+        # Получаем консультации из Calendly
+        try:
+            from _common import get_consultations
+            consultations = get_consultations(days=30)
+        except:
+            consultations = []
 
-        if not isinstance(sales_data, list):
-            sales_data = sales_data.get("sales", []) if isinstance(sales_data, dict) else []
+        # Объединяем обе потоки дохода
+        all_transactions = []
 
-        if not sales_data:
+        # Добавляем Gumroad продажи
+        for sale in sales_data:
+            all_transactions.append({
+                "email": sale.get("purchaser_email", ""),
+                "amount": float(sale.get("price", 0)) / 100,
+                "date": sale.get("purchased_at", ""),
+                "type": "praktikum"
+            })
+
+        # Добавляем Calendly консультации
+        for consultation in consultations:
+            if consultation.get("invitees"):
+                email = consultation["invitees"][0].get("email", "") if consultation["invitees"] else ""
+                all_transactions.append({
+                    "email": email,
+                    "amount": consultation.get("price", 0),
+                    "date": consultation.get("start_time", ""),
+                    "type": "consultation"
+                })
+
+        if not all_transactions:
             return json.dumps({
                 "status": "no_data",
-                "message": "Нет данных о продажах",
+                "message": "Нет данных о продажах и консультациях",
                 "ltv": 0,
-                "mrr": 0
+                "mrr": 0,
+                "sources": {"praktikum": 0, "consultations": 0}
             }, ensure_ascii=False, indent=2)
 
-        # Анализируем продажи
-        total_revenue = sum(float(s.get("price", 0)) / 100 for s in sales_data if s.get("price"))
-        unique_customers = len(set(s.get("purchaser_email", "") for s in sales_data if s.get("purchaser_email")))
-        purchase_dates = [s.get("purchased_at", "") for s in sales_data if s.get("purchased_at")]
+        # Анализируем всех клиентов
+        total_revenue = sum(t["amount"] for t in all_transactions)
+        unique_customers = len(set(t["email"] for t in all_transactions if t["email"]))
+        transaction_dates = [t["date"] for t in all_transactions if t["date"]]
 
+        # LTV: средний доход на одного клиента
         ltv = round(total_revenue / max(unique_customers, 1), 2)
 
-        # MRR: если есть даты, вычислим средний доход за месяц
-        mrr = round(total_revenue / max(len(purchase_dates) / 30, 1), 2) if purchase_dates else ltv
+        # MRR: прогноз среднемесячного дохода
+        mrr = round(total_revenue / max(len(transaction_dates) / 30, 1), 2) if transaction_dates else ltv
 
-        # Повторные покупки
-        customer_purchases = {}
-        for sale in sales_data:
-            email = sale.get("purchaser_email", "")
+        # Повторные покупки (консультации за одним клиентом)
+        customer_transactions = {}
+        for trans in all_transactions:
+            email = trans.get("email", "")
             if email:
-                customer_purchases[email] = customer_purchases.get(email, 0) + 1
+                customer_transactions[email] = customer_transactions.get(email, 0) + 1
 
-        repeat_customers = len([c for c in customer_purchases.values() if c > 1])
+        repeat_customers = len([c for c in customer_transactions.values() if c > 1])
         repeat_rate = round((repeat_customers / max(unique_customers, 1)) * 100, 1) if unique_customers > 0 else 0
+
+        # Разбивка по источникам
+        praktikum_revenue = sum(t["amount"] for t in all_transactions if t["type"] == "praktikum")
+        consultation_revenue = sum(t["amount"] for t in all_transactions if t["type"] == "consultation")
 
         return json.dumps({
             "status": "ok",
-            "period": "last 100 sales",
+            "period": "last 30 days + 100 sales",
+            "revenue_sources": {
+                "praktikum ($37)": f"${round(praktikum_revenue, 2)}",
+                "consultations ($120)": f"${round(consultation_revenue, 2)}"
+            },
             "metrics": {
                 "ltv": f"${ltv}",
                 "mrr": f"${mrr}",
@@ -135,8 +191,8 @@ def calc_ltv_and_mrr():
                 "unique_customers": unique_customers,
                 "repeat_customers": repeat_customers,
                 "repeat_rate": f"{repeat_rate}%",
-                "total_transactions": len(sales_data),
-                "avg_order_value": f"${round(total_revenue / len(sales_data), 2)}"
+                "total_transactions": len(all_transactions),
+                "avg_transaction_value": f"${round(total_revenue / len(all_transactions), 2)}"
             }
         }, ensure_ascii=False, indent=2)
 

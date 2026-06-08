@@ -1240,6 +1240,46 @@ def cleanup_old_agent_messages(max_age_hours: int = 24) -> int:
     return before - len(messages)
 
 
+# ─── APPROVAL GATE: статус постов перед публикацией ──────────────────────────
+# Виктория одобряет посты, затем публикация проверяет что они approved
+
+POST_APPROVALS = MEM_DIR / "post_approvals.json"
+
+def update_post(post_id: str, updates: dict) -> dict:
+    """Обновить статус поста (Victoria одобрил/отклонил)."""
+    with _FileLock():
+        posts = _read_json(POST_APPROVALS, {})
+        if post_id not in posts:
+            posts[post_id] = {
+                "id": post_id,
+                "created_at": _now(),
+                "status": "draft"
+            }
+        posts[post_id].update(updates)
+        posts[post_id]["updated_at"] = _now()
+        _write_json(POST_APPROVALS, posts)
+    log_event("post:updated", {"post_id": post_id, "status": updates.get("status")})
+    return posts[post_id]
+
+
+def get_post(post_id: str) -> dict:
+    """Получить статус поста."""
+    posts = _read_json(POST_APPROVALS, {})
+    return posts.get(post_id, {"id": post_id, "status": "draft", "created_at": _now()})
+
+
+def can_publish_post(post_id: str) -> bool:
+    """Проверить что пост одобрен для публикации."""
+    post = get_post(post_id)
+    return post.get("status") == "approved"
+
+
+def get_posts_pending_approval() -> list:
+    """Получить все посты ждущие одобрения Victoria."""
+    posts = _read_json(POST_APPROVALS, {})
+    return [p for p in posts.values() if p.get("status") not in ("approved", "published")]
+
+
 if __name__ == "__main__":
     # Быстрый самотест без сети и без LLM.
     print("MEM_DIR:", MEM_DIR)
