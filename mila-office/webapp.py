@@ -41,6 +41,7 @@ from flask import Flask, request, jsonify, redirect, session, Response, abort, s
 
 import base
 import memory  # общая память офиса (профиль/фаза/события) — для дашборда
+import error_monitor  # Централизованное логирование ошибок с Telegram alerts
 
 # ─── Логирование ─────────────────────────────────────────
 # Полный traceback пишем в файл, клиенту отдаём безопасное сообщение.
@@ -1679,6 +1680,59 @@ def api_publish_due():
             "ok": False,
             "error": str(e)
         }), 500
+
+
+@app.get("/api/errors/stats")
+def api_error_stats():
+    """Получить статистику ошибок за последние 24 часа.
+
+    Response:
+      {
+        "ok": true,
+        "period": "last 24 hours",
+        "total_errors": 5,
+        "by_type": {"ValueError": 2, "TimeoutError": 1},
+        "by_level": {"ERROR": 4, "CRITICAL": 1},
+        "by_context": {"webapp": 3, "pipeline": 2}
+      }
+    """
+    try:
+        hours = request.args.get("hours", 24, type=int)
+        stats = error_monitor.get_error_stats(hours=hours)
+        return jsonify({"ok": True, **stats})
+    except Exception as e:
+        logger.error(f"Error stats error: {e}", exc_info=True)
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.get("/api/errors/recent")
+def api_recent_errors():
+    """Получить последние N ошибок с деталями.
+
+    Query params:
+      limit=10 (по умолчанию)
+
+    Response:
+      {
+        "ok": true,
+        "errors": [
+          {
+            "timestamp": "2026-06-08T14:05:32Z",
+            "level": "ERROR",
+            "error_type": "ValueError",
+            "error_message": "invalid literal",
+            "context": {"agent": "lera"}
+          }
+        ]
+      }
+    """
+    try:
+        limit = request.args.get("limit", 10, type=int)
+        errors = error_monitor.get_recent_errors(limit=limit)
+        return jsonify({"ok": True, "count": len(errors), "errors": errors})
+    except Exception as e:
+        logger.error(f"Recent errors error: {e}", exc_info=True)
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @app.get("/dashboard")
@@ -3744,6 +3798,49 @@ def _open_browser():
         webbrowser.open(f"{scheme}://localhost:5000")
     except Exception:
         pass
+
+
+# ─── Глобальные error handlers с Telegram alerts ─────────────────────────────────────────
+
+@app.errorhandler(500)
+def handle_500(error):
+    """Обработка 500 ошибок: логируем, отправляем alert, возвращаем безопасный ответ."""
+    context = {
+        "source": "webapp",
+        "endpoint": request.path,
+        "method": request.method,
+        "user_agent": request.headers.get("User-Agent", "unknown")[:50]
+    }
+    error_monitor.log_error(error, context=context, alert=True, level="CRITICAL")
+    logger.error(f"500 Error: {error}", exc_info=True)
+    return jsonify({
+        "ok": False,
+        "error": "Внутренняя ошибка сервера. Техническая команда уведомлена."
+    }), 500
+
+
+@app.errorhandler(404)
+def handle_404(error):
+    """404 — не alert, просто логируем."""
+    logger.warning(f"404 Not Found: {request.path}")
+    return jsonify({"ok": False, "error": "Not found"}), 404
+
+
+@app.errorhandler(Exception)
+def handle_generic_error(error):
+    """Перехват всех необработанных исключений."""
+    context = {
+        "source": "webapp",
+        "endpoint": request.path,
+        "method": request.method,
+        "error_type": type(error).__name__
+    }
+    error_monitor.log_error(error, context=context, alert=isinstance(error, (RuntimeError, ValueError)), level="ERROR")
+    logger.error(f"Unhandled error: {error}", exc_info=True)
+    return jsonify({
+        "ok": False,
+        "error": "Ошибка при обработке запроса"
+    }), 500
 
 
 if __name__ == "__main__":
