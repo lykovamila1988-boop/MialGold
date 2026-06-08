@@ -22,6 +22,11 @@ try:
 except ImportError:
     requests = None
 
+try:
+    import data_sanitizer
+except ImportError:
+    data_sanitizer = None  # опционально, если module недоступен
+
 # === Пути и конфигурация ===
 
 MILA_FOLDER = Path(os.getenv("MILA_FOLDER", r"E:\MILA GOLD"))
@@ -66,6 +71,10 @@ def log_error(error, context=None, alert=False, level="ERROR"):
     """
     context = context or {}
 
+    # Санитизируем контекст перед логированием (удаляем конфиденциальные данные)
+    if data_sanitizer:
+        context = data_sanitizer.sanitize_dict(context, aggressive=False)
+
     # Форматируем информацию об ошибке
     error_data = {
         "timestamp": datetime.utcnow().isoformat() + "Z",
@@ -89,7 +98,7 @@ def log_error(error, context=None, alert=False, level="ERROR"):
         f"{error_data['error_type']}: {error_data['error_message']} | Context: {context}"
     )
 
-    # Отправляем Telegram alert если нужно
+    # Отправляем Telegram alert если нужно (с очищенными данными)
     if alert and TELEGRAM_TOKEN and TELEGRAM_ADMIN_CHAT_ID:
         _send_telegram_alert(error_data)
 

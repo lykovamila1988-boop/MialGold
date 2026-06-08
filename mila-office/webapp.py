@@ -42,6 +42,7 @@ from flask import Flask, request, jsonify, redirect, session, Response, abort, s
 import base
 import memory  # общая память офиса (профиль/фаза/события) — для дашборда
 import error_monitor  # Централизованное логирование ошибок с Telegram alerts
+import data_sanitizer  # Удаление конфиденциальных данных из логов
 
 # ─── Логирование ─────────────────────────────────────────
 # Полный traceback пишем в файл, клиенту отдаём безопасное сообщение.
@@ -1732,6 +1733,60 @@ def api_recent_errors():
         return jsonify({"ok": True, "count": len(errors), "errors": errors})
     except Exception as e:
         logger.error(f"Recent errors error: {e}", exc_info=True)
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.post("/api/check-sensitive-data")
+def api_check_sensitive_data():
+    """Проверить файл или текст на наличие конфиденциальных данных.
+
+    POST data:
+      {
+        "type": "text" | "file",
+        "content": "some text here",    # если type=text
+        "file_path": "03-clients/..."   # если type=file
+      }
+
+    Response:
+      {
+        "ok": true,
+        "has_sensitive": false,
+        "patterns_found": {},
+        "total_matches": 0
+      }
+    """
+    try:
+        data = request.get_json() or {}
+        check_type = data.get("type", "text")
+
+        if check_type == "text":
+            text = data.get("content", "")
+            # Проверяем текст на паттерны
+            patterns_found = {}
+            total_matches = 0
+            for pattern_name, pattern in data_sanitizer.PATTERNS.items():
+                matches = re.findall(pattern, text, flags=re.IGNORECASE)
+                if matches:
+                    patterns_found[pattern_name] = len(matches)
+                    total_matches += len(matches)
+
+            return jsonify({
+                "ok": True,
+                "has_sensitive": total_matches > 0,
+                "patterns_found": patterns_found,
+                "total_matches": total_matches
+            })
+
+        elif check_type == "file":
+            file_path = data.get("file_path", "")
+            result = data_sanitizer.check_file_for_sensitive_data(file_path)
+            return jsonify({"ok": True, **result})
+
+        else:
+            return jsonify({"ok": False, "error": "Invalid type (use 'text' or 'file')"}), 400
+
+    except Exception as e:
+        logger.error(f"Check sensitive data error: {e}", exc_info=True)
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
