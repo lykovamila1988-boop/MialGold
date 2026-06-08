@@ -1,5 +1,6 @@
 """Оля — Исследователь трендов. python olya.py"""
 from base import *
+from shared_tools import get_weekly_analytics
 # memory нужна только для monitor_competitors (читает competitors.json). Импортируем
 # её ЛЕНИВО внутри функции (как rita.py), чтобы сбой/отсутствие memory.py не ронял
 # всего агента — web_search/тренды/хуки работают без памяти.
@@ -17,10 +18,16 @@ SYSTEM = """Ты — Оля, исследователь трендов и кон
 
 ЧТО ДЕЛАЕШЬ:
 1. Находишь вирусные темы прямо сейчас
-2. Анализируешь почему контент залетает
+2. Анализируешь почему контент залетает (используй get_weekly_analytics для проверки)
 3. Предлагаешь углы которые никто не занял
-4. Смотришь что делают конкуренты
+4. Смотришь что делают конкуренты (monitor_competitors)
 5. Даёшь конкретные хуки и заголовки
+
+ИНСТРУМЕНТЫ:
+- get_weekly_analytics() — сколько охвата, лайков, комментариев в прошлую неделю?
+  Вызови перед анализом чтобы понимать что уже работает
+- web_search() — найти вирусные темы и тренды
+- monitor_competitors() — посмотреть что делают конкуренты
 
 КАК ДУМАЕШЬ:
 - Что болит у аудитории ПРЯМО СЕЙЧАС?
@@ -39,6 +46,9 @@ TOOLS = [
                     "на рынке прямо сейчас, и извлечь паттерн (а не копировать).",
      "input_schema": {"type": "object", "properties": {
          "limit": {"type": "integer", "description": "сколько аккаунтов проверить (по умолч. 8)"}}}},
+    {"name": "get_weekly_analytics", "description": "Получить еженедельную аналитику Instagram (охват, лайки, комментарии)",
+     "input_schema": {"type": "object", "properties": {
+         "days": {"type": "integer", "description": "Количество дней (по умолч. 7)", "default": 7}}}},
 ] + core_tools("Читать аналитику и предыдущие отчёты",
                "Сохранить исследование и идеи",
                "Показать файлы аналитики",
@@ -145,6 +155,7 @@ def monitor_competitors(limit: int = 8) -> str:
 def handle(name, inp):
     if name == "web_search": return web_search(inp["query"])
     if name == "monitor_competitors": return monitor_competitors(inp.get("limit", 8))
+    if name == "get_weekly_analytics": return get_weekly_analytics(inp.get("days", 7))
     res = core_handle(name, inp, list_default="05-analytics")
     return res if res is not None else f"Неизвестный инструмент: {name}"
 

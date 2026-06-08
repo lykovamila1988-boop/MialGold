@@ -210,6 +210,44 @@ def get_client_list():
         return f"Ошибка получения списка клиентов: {e}"
 
 
+def get_weekly_analytics(days=7):
+    """Получить еженедельную аналитику охвата, лайков, комментариев (для всех агентов).
+
+    Возвращает суммарные метрики за период:
+    - total_reach: сумма охвата всех постов
+    - total_engagement: сумма лайков + комментариев
+    - avg_reach_per_post: средний охват на пост
+    - total_posts: количество постов за период
+    """
+    from pathlib import Path
+    import sys
+
+    mila_folder = Path(os.getenv("MILA_FOLDER", r"E:\MILA GOLD"))
+    tools_dir = mila_folder / "tools"
+
+    if str(tools_dir) not in sys.path:
+        sys.path.insert(0, str(tools_dir))
+
+    try:
+        import weekly_stats
+        from _common import load_config
+
+        cfg = load_config()
+        stats = weekly_stats.get_weekly_stats(cfg, days=days)
+
+        return json.dumps({
+            "status": "ok",
+            "period": f"последние {days} дней",
+            "summary": stats["summary"],
+            "posts_count": len(stats["posts"]),
+            "start_date": stats["start_date"],
+            "end_date": stats["end_date"]
+        }, ensure_ascii=False, indent=2)
+
+    except Exception as e:
+        return f"Ошибка получения аналитики: {e}"
+
+
 def measure_sales_funnel(days=30):
     """Измерить воронку продаж: коррелирование постов с продажами (для Lera).
     Читает отчёты аналитики и Gumroad, вычисляет CTR и конверсию."""
