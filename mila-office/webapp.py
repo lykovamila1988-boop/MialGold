@@ -109,12 +109,8 @@ def _office_responder(mod, key):
     return respond
 
 
-def _marina_responder():
-    # Марина со своим run_tool, но через общий runner — чтобы тоже получать улучшения.
-    def respond(msg, history):
-        return base.run_agent(_client, base.compose_system("marina", marina.SYSTEM_PROMPT),
-                              marina.TOOLS, marina.run_tool, msg, history, agent_key="marina")
-    return respond
+# Marina теперь использует стандартный handle() как остальные агенты
+# (не нужен специальный _marina_responder)
 
 
 def _chips(mod):
@@ -134,7 +130,7 @@ AGENTS = {
         "intro": "Привет! 👋 Я Марина. Давай сегодня: прочитаю комментарии и подготовлю ответы, "
                  "соберу аналитику за неделю, напишу Reels или карусель, спланирую стратегию. "
                  "Выбери внизу или скажи, что нужно.",
-        "responder": _marina_responder(), "chips": _chips(marina),
+        "responder": _office_responder(marina, "marina"), "chips": _chips(marina),
     },
     "victoria": {
         "name": "Виктория", "role": "Редактор", "emoji": "✍️", "color": "#4A7A5E",

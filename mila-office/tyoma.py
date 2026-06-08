@@ -1,5 +1,6 @@
 """Тёма — Telegram-менеджер. python tyoma.py"""
 from base import *
+from shared_tools import telegram_send, telegram_get_updates, telegram_channel_stats
 
 SYSTEM = """Ты — Тёма, менеджер Telegram-канала Людмилы Лыковой (@liudmyla.lykova).
 
@@ -21,7 +22,13 @@ SYSTEM = """Ты — Тёма, менеджер Telegram-канала Людми
 2. Ведёшь welcome-цепочку для новых подписчиков
 3. Отвечаешь на «ХОЧУ» (через бота)
 4. Создаёшь контент для канала
-5. Смотришь статистику канала
+5. Смотришь статистику канала (всегда вызови telegram_channel_stats() когда спрашивают про статистику)
+
+ИНСТРУКЦИЯ:
+Когда просят про статистику или что работает:
+- Вызови telegram_channel_stats() с chat_id канала (если не знаешь, спроси)
+- Это покажет членов канала и основные метрики
+- На основе этого предложи 2-3 конкретных шага для роста (время публикации, тип контента, etc)
 
 ВАЖНО: Никогда не публикуй без подтверждения если не сказано явно."""
 
@@ -41,50 +48,10 @@ TOOLS = core_tools("Читать контент для публикации",
      "input_schema": {"type": "object", "properties": {"chat_id": {"type": "string"}}}},
 ]
 
-def tg_send(chat_id, text, confirm=True):
-    if not TELEGRAM_TOKEN: return "⚠️ Нет TELEGRAM_BOT_TOKEN в .env"
-    if confirm: return f"📋 ЧЕРНОВИК (не опубликовано):\n\n{text}\n\nЧтобы опубликовать — скажи 'подтверди публикацию'"
-    try:
-        r = requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"}, timeout=10)
-        data = r.json()
-        if data.get("ok"):
-            log("telegram", f"Sent to {chat_id}: {text[:50]}")
-            return f"✓ Опубликовано! Message ID: {data['result']['message_id']}"
-        return f"Ошибка: {data.get('description')}"
-    except Exception as e: return f"Ошибка: {e}"
-
-def tg_updates():
-    if not TELEGRAM_TOKEN: return "⚠️ Нет TELEGRAM_BOT_TOKEN в .env"
-    try:
-        r = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates",
-            params={"limit": 20}, timeout=10)
-        updates = r.json().get("result", [])
-        messages = []
-        for u in updates:
-            msg = u.get("message", {})
-            if msg.get("text"):
-                messages.append({
-                    "from": msg.get("from", {}).get("first_name"),
-                    "username": msg.get("from", {}).get("username"),
-                    "text": msg.get("text"),
-                    "time": msg.get("date")
-                })
-        return json.dumps(messages, ensure_ascii=False, indent=2)
-    except Exception as e: return f"Ошибка: {e}"
-
-def tg_stats(chat_id):
-    if not TELEGRAM_TOKEN: return "⚠️ Нет TELEGRAM_BOT_TOKEN"
-    try:
-        r = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getChatMemberCount",
-            params={"chat_id": chat_id}, timeout=10)
-        return json.dumps(r.json(), ensure_ascii=False, indent=2)
-    except Exception as e: return f"Ошибка: {e}"
-
 def handle(name, inp):
-    if name == "telegram_send": return tg_send(inp["chat_id"], inp["text"], inp.get("confirm", True))
-    if name == "telegram_get_updates": return tg_updates()
-    if name == "telegram_channel_stats": return tg_stats(inp.get("chat_id", ""))
+    if name == "telegram_send": return telegram_send(inp["chat_id"], inp["text"], inp.get("confirm", True))
+    if name == "telegram_get_updates": return telegram_get_updates()
+    if name == "telegram_channel_stats": return telegram_channel_stats(inp.get("chat_id", ""))
     res = core_handle(name, inp, list_default="04-telegram")
     return res if res is not None else f"Неизвестный инструмент: {name}"
 

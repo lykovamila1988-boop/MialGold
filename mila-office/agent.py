@@ -50,6 +50,9 @@ SYSTEM_PROMPT = """Ты — Марина, маркетолог и стратег
 их списком в queue_comment_replies. Не публикуй пачкой — очередь отправит по одному с паузой.
 """
 
+# Алиас для совместимости с webapp.py, pipeline.py (они используют SYSTEM)
+SYSTEM = SYSTEM_PROMPT
+
 # ─── TOOLS DEFINITION ────────────────────────────────────
 TOOLS = [
     {
@@ -406,6 +409,12 @@ def run_tool(name: str, inputs: dict) -> str:
     return handler()
 
 # ─── AGENT LOOP ──────────────────────────────────────────
+
+def handle(name: str, inputs: dict) -> str:
+    """Унифицированный интерфейс handle() для интеграции с webapp.py и pipeline.py.
+    Остальные агенты используют handle(name, inputs) — Marina теперь тоже."""
+    return run_tool(name, inputs)
+
 
 def run_agent(user_message: str, history: list):
     """Делегирует в общий base.run_agent — единый tool-use цикл для всех агентов

@@ -31,6 +31,7 @@ import importlib
 import threading
 from pathlib import Path
 
+import time
 import base
 import memory
 import policies
@@ -60,6 +61,24 @@ _STATE_DIR = base.MILA_FOLDER / "reports"
 
 def _state_path(chain):
     return _STATE_DIR / f"pipeline_state_{chain}.json"
+
+
+def run_agent_with_retry(client, system, tools, handle, msg, history, agent_key, max_retries=3, initial_delay=1):
+    """Запустить агента с retry и exponential backoff."""
+    retry_delay = initial_delay
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            return base.run_agent(client, system, tools, handle, msg, history, agent_key=agent_key)
+        except Exception as e:
+            last_error = e
+            if attempt < max_retries - 1:
+                print(f"  Попытка {attempt + 1}/{max_retries} упала: {type(e).__name__}. Повтор через {retry_delay}s...")
+                time.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, 60)  # exponential backoff, макс 60 сек
+            else:
+                print(f"  Все {max_retries} попыток исчерпаны.")
+    raise last_error
 
 
 def _load_state(chain):
@@ -255,8 +274,8 @@ def run_chain(name: str, notify: bool = False) -> dict:
             system = base.compose_system(spec["key"], spec["system"])
             print(f"\n=== {agent_key} ({idx + 1}/{len(steps)}) ===")
             try:
-                reply, _ = base.run_agent(client, system, spec["tools"], spec["handle"],
-                                          task, [], agent_key=spec["key"])
+                reply, _ = run_agent_with_retry(client, system, spec["tools"], spec["handle"],
+                                                task, [], agent_key=spec["key"])
             except Exception as e:
                 # Падение на шаге: сохраняем прогресс — повтор продолжит отсюда.
                 _save_state(name, {"context_ts": ctx.get("ts"), "steps": transcript,
@@ -388,8 +407,8 @@ def run_new_product(idea: str, approve_gamma: bool = False, notify: bool = False
                 task = template.format(prev=prev, context=ctx_json, idea=idea)
                 system = base.compose_system(spec["key"], spec["system"])
                 print(f"\n=== {agent_key} ===")
-                reply, _ = base.run_agent(client, system, spec["tools"], spec["handle"],
-                                          task, [], agent_key=spec["key"])
+                reply, _ = run_agent_with_retry(client, system, spec["tools"], spec["handle"],
+                                                task, [], agent_key=spec["key"])
                 print(reply)
                 transcript.append({"agent": agent_key, "reply": reply})
                 if idx + 1 < len(steps):
@@ -471,8 +490,8 @@ def run_new_product(idea: str, approve_gamma: bool = False, notify: bool = False
             msg = task.format(prev=prev, meta=json.dumps(meta, ensure_ascii=False))
             system = base.compose_system(spec["key"], spec["system"])
             print(f"\n=== {agent_key} ===")
-            reply, _ = base.run_agent(client, system, spec["tools"], spec["handle"],
-                                      msg, [], agent_key=spec["key"])
+            reply, _ = run_agent_with_retry(client, system, spec["tools"], spec["handle"],
+                                            msg, [], agent_key=spec["key"])
             print(reply)
             transcript.append({"agent": agent_key, "reply": reply})
             prev = reply

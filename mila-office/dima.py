@@ -1,5 +1,6 @@
 """Дима — Финансовый агент. python dima.py"""
 from base import *
+from shared_tools import gumroad_sales as get_gumroad_sales, calc_ltv_and_mrr
 
 SYSTEM = """Ты — Дима, финансовый агент Людмилы Лыковой. Считаешь деньги, строишь прогнозы, отслеживаешь рост бизнеса.
 
@@ -18,10 +19,17 @@ SYSTEM = """Ты — Дима, финансовый агент Людмилы Л
 
 ЧТО ДЕЛАЕШЬ:
 1. Считаешь доход за период (Gumroad + консультации)
-2. Сравниваешь с целями
-3. Строишь прогнозы
-4. Говоришь что нужно сделать чтобы вырасти
-5. Ищешь узкие места в монетизации
+2. Рассчитываешь LTV и MRR (всегда вызови calc_ltv_and_mrr())
+3. Анализируешь repeat customers (кто купил дважды?)
+4. Сравниваешь с целями
+5. Строишь прогнозы и даёшь рекомендации по росту
+6. Ищешь узкие места в монетизации
+
+ИНСТРУКЦИЯ:
+Когда просят про доход, LTV, прибыль или финансовый отчёт:
+- Вызови calc_ltv_and_mrr() чтобы получить metrics (LTV, MRR, repeat rate)
+- Это покажет тебе среднего клиента и потенциал допродаж
+- На основе этого предложи 2-3 конкретных шага для роста (например: focus на repeat customers vs new acquisition)
 
 СТРУКТУРА ДАННЫХ:
 - 05-analytics/gumroad_*.csv — продажи практикума
@@ -35,23 +43,14 @@ TOOLS = core_tools("Читать финансовые данные",
                    "Показать финансовые файлы",
                    list_default="05-analytics") + [
     {"name": "gumroad_sales", "description": "Получить продажи с Gumroad API",
-     "input_schema": {"type": "object", "properties": {"period": {"type": "string", "default": "month"}}}},
+     "input_schema": {"type": "object", "properties": {}}},
+    {"name": "calc_ltv_and_mrr", "description": "Рассчитать LTV (lifetime value) и MRR (monthly recurring revenue) + repeat rate",
+     "input_schema": {"type": "object", "properties": {}}},
 ]
 
-def gumroad_sales(period="month"):
-    token = GUMROAD_TOKEN
-    if not token: return "⚠️ Нет GUMROAD_ACCESS_TOKEN в .env"
-    try:
-        r = requests.get("https://api.gumroad.com/v2/sales",
-                        params={"access_token": token}, timeout=10)
-        sales = r.json().get("sales", [])
-        total = sum(float(s.get("price", 0))/100 for s in sales)
-        return json.dumps({"count": len(sales), "total_usd": round(total, 2), "sales": sales[:5]}, indent=2)
-    except Exception as e:
-        return f"Gumroad ошибка: {e}"
-
 def handle(name, inp):
-    if name == "gumroad_sales": return gumroad_sales(inp.get("period", "month"))
+    if name == "gumroad_sales": return get_gumroad_sales(limit=20)
+    if name == "calc_ltv_and_mrr": return calc_ltv_and_mrr()
     res = core_handle(name, inp, list_default="05-analytics")
     return res if res is not None else f"Неизвестный инструмент: {name}"
 

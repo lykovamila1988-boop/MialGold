@@ -40,6 +40,7 @@ SUPERVISOR_STATUS = MEM_DIR / "supervisor_status.json"
 REPLY_QUEUE = MEM_DIR / "reply_queue.json"
 DOC_WORKFLOWS = MEM_DIR / "doc_workflows.json"
 AGENT_HISTORIES = MEM_DIR / "agent_histories.json"
+AGENT_MESSAGES = MEM_DIR / "agent_messages.json"  # Inter-agent messaging
 _LOCK = MEM_DIR / ".lock"
 ACTIVE_TASK_STATUSES = {"pending", "running"}
 
@@ -1180,6 +1181,63 @@ def clear_all_histories() -> dict:
         _write_json(AGENT_HISTORIES, {})
     log_event(f"agent:histories:cleared_all", {})
     return {"ok": True, "cleared": "all"}
+
+
+# ─── Inter-agent messaging: агенты могут отправлять вопросы друг другу ──────
+def send_agent_message(from_agent: str, to_agent: str, subject: str, question: str) -> dict:
+    """Отправить вопрос от одного агента другому."""
+    _ensure()
+    msg_id = f"{from_agent}_{to_agent}_{_now_ts()}"
+    msg = {
+        "id": msg_id,
+        "from_agent": from_agent,
+        "to_agent": to_agent,
+        "subject": subject,
+        "question": question,
+        "answer": None,
+        "status": "pending",  # pending, answered, expired
+        "created_at": _now(),
+        "answered_at": None
+    }
+    with _FileLock():
+        messages = _read_json(AGENT_MESSAGES, [])
+        messages.append(msg)
+        _write_json(AGENT_MESSAGES, messages)
+    log_event("agent_message:send", {"from": from_agent, "to": to_agent, "subject": subject})
+    return msg
+
+
+def get_agent_messages(to_agent: str, status: str = "pending") -> list:
+    """Получить сообщения для агента (по умолчанию только неответленные)."""
+    messages = _read_json(AGENT_MESSAGES, [])
+    return [m for m in messages if m.get("to_agent") == to_agent and m.get("status") == status]
+
+
+def answer_agent_message(msg_id: str, answer: str) -> dict:
+    """Ответить на сообщение от другого агента."""
+    with _FileLock():
+        messages = _read_json(AGENT_MESSAGES, [])
+        for msg in messages:
+            if msg.get("id") == msg_id:
+                msg["answer"] = answer
+                msg["status"] = "answered"
+                msg["answered_at"] = _now()
+                _write_json(AGENT_MESSAGES, messages)
+                log_event("agent_message:answer", {"msg_id": msg_id})
+                return msg
+    return {}
+
+
+def cleanup_old_agent_messages(max_age_hours: int = 24) -> int:
+    """Удалить старые сообщения (по умолчанию старше 24 часов)."""
+    with _FileLock():
+        messages = _read_json(AGENT_MESSAGES, [])
+        before = len(messages)
+        cutoff = time.time() - (max_age_hours * 3600)
+        messages = [m for m in messages
+                   if time.fromisoformat(m.get("created_at", _now()).replace('Z', '+00:00')).timestamp() > cutoff]
+        _write_json(AGENT_MESSAGES, messages)
+    return before - len(messages)
 
 
 if __name__ == "__main__":
