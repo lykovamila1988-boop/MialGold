@@ -1,0 +1,339 @@
+# ============================================================
+# MILA Office — Документация всех workflow цепочек
+# ============================================================
+# Версия: 1.0
+# Дата: 2026-06-08
+#
+# Это ЕДИНСТВЕННЫЙ источник правды для всех автоматизаций:
+# - Какие агенты участвуют и в каком порядке
+# - Какие данные течут между агентами
+# - Когда и как запускаются цепочки
+# - Как обрабатываются ошибки
+#
+# Файл используется в:
+# - pipeline.py (execute_workflow функция)
+# - мониторинге (какие фазы и этапы ожидаются)
+# - документации для Людмилы (что происходит за сценами)
+# ============================================================
+
+workflows:
+  # ──────────────────────────────────────────────────────
+  # ОСНОВНОЙ ЦИКЛ: Еженедельное создание и публикация контента
+  # ──────────────────────────────────────────────────────
+  content_week:
+    name: "Еженедельный контент-цикл"
+    description: "Цикл создания, редактуры и расписания контента (Monday–Sunday)"
+
+    schedule: "Every Monday 09:00 UTC"
+    timeout: "2 hours"
+    on_failure: "Alert Людмила via Telegram"
+
+    steps:
+      # ЭТАП 1: НАЙТИ ТРЕНДЫ (Олина исследует)
+      - step_id: 1.1
+        agent: olya
+        action: "find_trends"
+        function: "web_search('психология отношения тренды 2026')"
+        input: "week='this_week'"
+        output: "trends = [{'theme': str, 'why_viral': str, 'angle': str}, ...]"
+        description: "Найти 5-7 вирусных тем недели в нише психологии отношений"
+        timeout: 300
+
+      # ЭТАП 2: НАПИСАТЬ ПОСТЫ (Марина создаёт)
+      - step_id: 1.2
+        agent: marina
+        action: "write_posts"
+        function: "run_agent('marina', 'Напиши 5 постов на основе трендов: ' + format(trends))"
+        input: "trends from 1.1"
+        output: "posts = [{'id': uuid, 'text': str, 'type': 'post|reel|story'}, ...]"
+        description: "Написать 5-7 вариантов постов в голосе Людмилы (хук + CTA)"
+        timeout: 600
+        log_as: "P1_create"  # Логировать как P1 (creation)
+
+      # ЭТАП 3: РЕДАКТУРА И ОДОБРЕНИЕ (Виктория проверяет)
+      - step_id: 1.3
+        agent: victoria
+        action: "review_and_approve"
+        function: "run_agent('victoria', 'Отредактируй посты и скажи какие approved: ' + format(posts))"
+        input: "posts from 1.2"
+        output: "approved_posts = [{...post, 'status': 'approved', 'feedback': str}, ...]"
+        description: "Виктория редактирует, проверяет грамматику, голос, CTA. Одобряет (status=approved)"
+        timeout: 900
+        log_as: "P2_review"  # Логировать как P2 (review)
+        approval_gate: true  # Без одобрения Victoria пост не идёт дальше
+
+      # ЭТАП 4: РАЗБОР ВИЗУАЛОВ (Сашина зарезервирована для будущего)
+      # - step_id: 1.4
+      #   agent: sasha
+      #   action: "generate_images"
+      #   description: "Сашина (дизайнер) генерирует визуалы"
+
+      # ЭТАП 5: РАСПИСАНИЕ ПО ДНЯМ (Васяя организует)
+      - step_id: 1.5
+        agent: vasya
+        action: "schedule_posts"
+        function: "run_agent('vasya', 'Распиши эти посты по дням недели: ' + format(approved_posts))"
+        input: "approved_posts from 1.3"
+        output: "scheduled = [{...post, 'scheduled_at': datetime, 'platform': 'instagram'}, ...]"
+        description: "Васяя расписывает посты по дням (Monday–Saturday, best times)"
+        timeout: 300
+
+      # ЭТАП 6: ПУБЛИКАЦИЯ (асинхронно, каждый день)
+      - step_id: 1.6
+        agent: vasya
+        action: "publish_due"
+        function: "pipeline.publish_due()  # Запускается ежедневно webhook'ом"
+        input: "scheduled from 1.5"
+        output: "published = [{...post, 'instagram_media_id': str, 'published_at': datetime}, ...]"
+        description: "Публикация по расписанию (автоматически каждый день в 9:00 UTC)"
+        schedule: "Daily 09:00 UTC via n8n webhook"
+        log_as: "P3_publish"  # Логировать как P3 (publish)
+
+    data_flow:
+      "Olya trends" -> "Marina (write)" -> "Victoria (review)" -> "Vasya (schedule)" -> "Vasya (publish)"
+
+    monitoring:
+      - "Completion rate: % постов дошедших до публикации"
+      - "Bottleneck: Victoria vs Vasya (где теряются посты?)"
+      - "Success rate: % успешных публикаций"
+      - Логирование в MILA-BUSINESS/05-analytics/automation_runs.jsonl
+
+  # ──────────────────────────────────────────────────────
+  # ВТОРИЧНЫЙ ЦИКЛ: Ответы на комментарии (асинхронно)
+  # ──────────────────────────────────────────────────────
+  instagram_engagement:
+    name: "Ответы на комментарии"
+    description: "Фоновый цикл: Monitor comments → Marina replies → async send"
+
+    schedule: "Every 4 hours"
+    timeout: "30 minutes"
+    on_failure: "Log error, continue"
+
+    steps:
+      - step_id: 2.1
+        agent: rita
+        action: "fetch_comments"
+        function: "tools/get_analytics.py comments"
+        output: "comments with LEAD_WORDS (хочу/цена/заказ)"
+        description: "Rita получает новые комментарии с детектом лидов"
+        timeout: 60
+
+      - step_id: 2.2
+        agent: marina
+        action: "draft_replies"
+        function: "run_agent('marina', 'Напиши ответы на эти комментарии: ' + format(comments))"
+        input: "lead comments from 2.1"
+        output: "replies = [{post_id, comment_id, reply_text}, ...]"
+        description: "Marina пишет тёплые ответы (не promotional, помогающие)"
+        timeout: 300
+
+      - step_id: 2.3
+        agent: marina
+        action: "queue_replies"
+        function: "memory.queue_message('instagram_comments', reply_text, confirm=False)"
+        input: "replies from 2.2"
+        output: "queued"
+        description: "Ставит в очередь без подтверждения (асинхронно)"
+
+    data_flow: "Rita (monitor)" -> "Marina (write)" -> "queue"
+
+  # ──────────────────────────────────────────────────────
+  # ВТОРИЧНЫЙ ЦИКЛ: Telegram канал (асинхронно)
+  # ──────────────────────────────────────────────────────
+  telegram_posting:
+    name: "Публикация в Telegram канал"
+    description: "Зеркало лучших Instagram постов в Telegram (с ссылками)"
+
+    schedule: "3 times per week (Tue/Thu/Sat 10:00 UTC)"
+    timeout: "10 minutes"
+
+    steps:
+      - step_id: 3.1
+        agent: olya
+        action: "select_best_posts"
+        function: "Выбрать топ-3 поста по engagement из Instagram"
+        output: "posts_for_telegram"
+        description: "Какие посты из Instagram лучше всего перепостить в Telegram?"
+
+      - step_id: 3.2
+        agent: tyoma
+        action: "adapt_for_telegram"
+        function: "run_agent('tyoma', 'Адаптируй для Telegram (можно ссылки): ' + format(posts))"
+        input: "posts from 3.1"
+        output: "telegram_messages"
+        description: "Тёма адаптирует под Telegram стиль (личнее, позволены ссылки)"
+
+      - step_id: 3.3
+        agent: tyoma
+        action: "post_to_channel"
+        function: "memory.queue_message('telegram', text, confirm=False)"
+        input: "messages from 3.2"
+        description: "Отправить в канал"
+        timeout: 60
+
+  # ──────────────────────────────────────────────────────
+  # TERTIARY: Финансовый отчёт (еженедельно)
+  # ──────────────────────────────────────────────────────
+  financial_report:
+    name: "Еженедельный финансовый отчёт"
+    description: "Какой доход? LTV? Прогноз? Сравнение с целями"
+
+    schedule: "Every Sunday 17:00 UTC"
+    timeout: "15 minutes"
+
+    steps:
+      - step_id: 4.1
+        agent: dima
+        action: "calc_metrics"
+        function: "calc_ltv_and_mrr() + automation_stats()"
+        output: "ltv, mrr, completion_rate, bottleneck"
+
+      - step_id: 4.2
+        agent: dima
+        action: "generate_report"
+        function: "write_file('05-analytics/finance_YYYY-MM-DD.json', metrics)"
+        output: "report saved"
+
+      - step_id: 4.3
+        agent: tyoma
+        action: "send_summary"
+        function: "memory.queue_message('telegram', report_summary)"
+        description: "Отправить краткую сводку Людмиле в приватный Telegram"
+
+  # ──────────────────────────────────────────────────────
+  # TERTIARY: Аналитика постов (ежедневно)
+  # ──────────────────────────────────────────────────────
+  instagram_analytics:
+    name: "Ежедневная аналитика Instagram"
+    description: "Сбор статистики постов для отчётов"
+
+    schedule: "Daily 00:00 UTC"
+    timeout: "10 minutes"
+    external_trigger: "n8n workflow (fetch-instagram-stats)"
+
+    steps:
+      - step_id: 5.1
+        action: "run_command"
+        command: "python tools/get_analytics.py posts"
+        output: "reports/posts_YYYY-MM-DD.json"
+
+      - step_id: 5.2
+        action: "run_command"
+        command: "python tools/get_analytics.py comments"
+        output: "reports/comments_YYYY-MM-DD.json"
+
+    note: "Запускается из n8n, результаты используются Rita + Olya"
+
+# ============================================================
+# ДАННЫЕ ПОТОКИ И ИСТОЧНИКИ ПРАВДЫ
+# ============================================================
+data_sources:
+
+  # Instagram статистика
+  instagram_reports:
+    description: "Ежедневные отчёты из Instagram Graph API"
+    files:
+      - "reports/posts_*.json"
+      - "reports/comments_*.json"
+    generated_by: "tools/get_analytics.py"
+    schedule: "Daily 00:00 UTC"
+    used_by: ["rita", "olya", "lera", "dima"]
+    note: "Источник: Instagram Graph API. Структура: [{'id', 'type', 'reach', 'likes', 'comments', ...}]"
+
+  # Продажи Gumroad
+  gumroad_sales:
+    description: "Продажи практикума из Gumroad API"
+    used_by: ["lera", "dima"]
+    function: "shared_tools.gumroad_sales()"
+    note: "Всегда вызывать через shared_tools, не дублировать"
+
+  # Консультации Calendly
+  calendly_consultations:
+    description: "Завершённые консультации из Calendly API"
+    used_by: ["dima"]
+    function: "tools._common.get_consultations(days=30)"
+    note: "$120 за консультацию, входит в LTV/MRR расчёты"
+
+  # Память агентов
+  memory_store:
+    description: "Персистентное хранилище для всех агентов"
+    location: "mila-office/memory.py"
+    types:
+      - "competitor list (competitors.json)"
+      - "agent messages (inter-agent messaging)"
+      - "automation runs log (automation_runs.jsonl)"
+      - "post approval tracking"
+    used_by: ["все агенты"]
+
+  # Клиентская БД
+  clients:
+    description: "Информация о клиентах из intake-форм"
+    location: "MILA-BUSINESS/03-clients/intake-forms/"
+    used_by: ["alina"]
+    function: "shared_tools.find_clients_by_pattern()"
+
+# ============================================================
+# МОНИТОРИНГ И АЛЕРТЫ
+# ============================================================
+monitoring:
+
+  automation_funnel:
+    metric: "completion_rate"
+    description: "% постов прошедших P1→P2→P3"
+    target: "> 80%"
+    alert_if: "< 60%"
+    checked_by: "dima.automation_stats()"
+
+  bottleneck_detection:
+    metric: "где теряются посты?"
+    description: "На каком этапе завис процесс?"
+    alert_types:
+      - "Victoria не редактирует (P2 < P1 * 0.8)"
+      - "Vasya не публикует (P3 < P2 * 0.8)"
+    checked_by: "dima.automation_stats()"
+
+  financial_health:
+    metric: "LTV, MRR, repeat_rate"
+    target: "LTV > $200, MRR > $5000, repeat_rate > 20%"
+    checked_by: "dima.calc_ltv_and_mrr()"
+    frequency: "Weekly (Sunday)"
+
+# ============================================================
+# ВЕРСИОНИРОВАНИЕ И МОНИТОРИНГ ПРОМПТОВ
+# ============================================================
+prompt_management:
+  location: "MILA-BUSINESS/05-analytics/prompt-versions/"
+  versioning: "Автоматическое сохранение каждого изменения"
+  manager: "Manager/Стас может улучшать промпты и откатываться"
+  history:
+    - "prompt-versions/{agent_name}/{timestamp}.md — версия промпта"
+    - "Все изменения с бэкапами, откат через revert_agent()"
+
+# ============================================================
+# АРХИТЕКТУРА И ОГРАНИЧЕНИЯ
+# ============================================================
+architecture:
+  agents:
+    - "Marina: Content creation (P1_create)"
+    - "Victoria: Editing & approval (P2_review) — approval_gate"
+    - "Vasya: Publishing & scheduling (P3_publish)"
+    - "Olya: Trend research & post selection"
+    - "Lera: Sales copywriting (lead generation)"
+    - "Dima: Financial metrics & reporting"
+    - "Tyoma: Telegram management"
+    - "Rita: Audience insights & comments"
+    - "Alina: Client management"
+    - "Manager: Prompt versioning & monitoring"
+    - "Kirill: Content strategy & optimization"
+
+  approval_gate: "Victoria must approve before P3 publish"
+  async_components: "Instagram replies, Telegram posts (queue-based)"
+  retry_logic: "Exponential backoff (1s, 2s, 4s) up to 3 retries"
+  timeout: "60 seconds per agent call, 5 minutes total job"
+
+constraints:
+  - "No new agents allowed (use 11 existing fleet)"
+  - "session_notes/ is confidential (never publish)"
+  - "Supabase access via service_role_key only (for Manager)"
+  - "Command execution via allowlist only (no RCE)"
+  - "All files must use utf-8 encoding"
