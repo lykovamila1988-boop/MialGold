@@ -112,6 +112,18 @@ def request_revisions(post_id, feedback):
         log("victoria", f"Error requesting revisions: {e}")
         return f"⚠️ Ошибка при отправке на доработку: {e}"
 
+
+def answer_message(msg_id, answer=""):
+    """Victoria отвечает на сообщение от другого агента (помечает как answered)."""
+    try:
+        import memory
+        result = memory.answer_agent_message(msg_id, answer or "Обработано")
+        log("victoria", f"Answered message {msg_id}")
+        return f"✓ Сообщение отмечено как ответленное"
+    except Exception as e:
+        log("victoria", f"Error answering message: {e}")
+        return f"⚠️ Ошибка: {e}"
+
 TOOLS = [
     {"name": "generate_image",
      "description": "Сгенерировать изображение для поста (Canva/DALL-E API или инструкция)",
@@ -166,25 +178,8 @@ QUICK = {
     "/сообщения": "Покажи сообщения от других агентов (Лера, Марина и т.д.)",
 }
 
-# При запуске Victoria, показать входящие сообщения
-def _get_pending_messages():
-    """Получить сообщения для Victoria от других агентов."""
-    try:
-        from mila_office import memory
-        messages = memory.get_agent_messages("victoria", status="pending")
-        if messages:
-            msg_list = []
-            for msg in messages[:3]:  # Показать последние 3
-                msg_list.append(f"📮 От {msg.get('from_agent')} ({msg.get('subject')}):\n{msg.get('question', '')[:200]}")
-            return "\n\n".join(msg_list)
-        return None
-    except:
-        return None
-
-# Добавить сообщения в систему prompt если есть входящие
-_pending = _get_pending_messages()
-if _pending:
-    SYSTEM += f"\n\n⚠️ ВХОДЯЩИЕ СООБЩЕНИЯ:\n{_pending}"
+# Сообщения показываются динамически в handle, не добавляем в статический SYSTEM
+# (иначе старые сообщения остаются в prompt forever и создают циклы)
 
 if __name__ == "__main__":
     chat_loop("Виктория", "✍️", "green", SYSTEM, TOOLS, handle, QUICK)
