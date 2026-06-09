@@ -1,0 +1,671 @@
+MILA OFFICE — ARCHITECTURE DIAGRAMS & FLOWS
+===========================================
+
+Detailed ASCII diagrams for system architecture, data flows, and common patterns.
+
+
+1. SYSTEM ARCHITECTURE — OVERVIEW
+==================================
+
+┌────────────────────────────────────────────────────────────────────────────┐
+│                         EXTERNAL WORLD                                    │
+├─────────────┬──────────────┬──────────────┬──────────────┬─────────────────┤
+│  Instagram  │  Gumroad     │  Telegram    │  n8n         │  Gamma API      │
+│  Graph API  │  (sales)     │  Bot         │  (workflows) │  (PDF gen)      │
+└─────────────┴──────────────┴──────────────┴──────────────┴─────────────────┘
+                                   ▲
+                                   │ HTTP requests
+                                   │
+┌────────────────────────────────────────────────────────────────────────────┐
+│                     MILA OFFICE (Flask + Python)                          │
+│                                                                            │
+│  ┌──────────────────────────────────────────────────────────────────┐    │
+│  │  WEBAPP (http://127.0.0.1:5000)                                 │    │
+│  │  • 11 agent tabs (marina, victoria, rita, etc)                  │    │
+│  │  • Chain dashboard (/chains)                                    │    │
+│  │  • File upload/download manager                                 │    │
+│  │  • Chat history per agent                                       │    │
+│  └──────────────────────────────────────────────────────────────────┘    │
+│                                ▲ ▲                                        │
+│                                │ │                                        │
+│  ┌─────────────────────────────┘ │                                        │
+│  │  ┌────────────────────────────┘                                        │
+│  │  │                                                                     │
+│  ▼  ▼                                                                     │
+│  ┌──────────────────────────────────────────────────────────────────┐    │
+│  │  N8N_WEBHOOK (http://127.0.0.1:5052)                            │    │
+│  │  POST /api/n8n/trigger-chain                                    │    │
+│  │  GET  /chains/api/active, /history, /metrics                    │    │
+│  │  → Starts chains, monitors, calls webhook callbacks             │    │
+│  └──────────────────────────────────────────────────────────────────┘    │
+│                                                                            │
+│  ┌──────────────────────────────────────────────────────────────────┐    │
+│  │  CORE INFRASTRUCTURE (imported by all modules)                   │    │
+│  │  ┌─ base.py (agent runner, tools, LLM client)                  │    │
+│  │  ├─ memory.py (shared JSON state, locking)                     │    │
+│  │  ├─ system_prompt_builder.py (context injection)               │    │
+│  │  ├─ error_monitor.py (centralized logging + Telegram)          │    │
+│  │  ├─ chain_retry.py (recovery + escalation)                     │    │
+│  │  ├─ chain_dashboard.py (Flask blueprint for /chains/*)         │    │
+│  │  ├─ policies.py (agent capability restrictions)                │    │
+│  │  ├─ data_sanitizer.py (remove PII from logs)                   │    │
+│  │  └─ shared_tools.py (Gumroad, Telegram, common functions)      │    │
+│  └──────────────────────────────────────────────────────────────────┘    │
+│                                                                            │
+│  ┌──────────────────────────────────────────────────────────────────┐    │
+│  │  11 AGENT MODULES (each with SYSTEM, TOOLS, handle)             │    │
+│  │  ┌─ Марина (MARINA/agent.py) — content marketer               │    │
+│  │  ├─ Виктория (VICTORIA) — editor                               │    │
+│  │  ├─ Рита (RITA) — content analyst                              │    │
+│  │  ├─ Алина (ALINA) — CRM / intake                               │    │
+│  │  ├─ Лера (LERA) — sales / presentations                        │    │
+│  │  ├─ Дима (DIMA) — financials / Gumroad                         │    │
+│  │  ├─ Тёма (TYOMA) — Telegram                                    │    │
+│  │  ├─ Оля (OLYA) — trends & research                             │    │
+│  │  ├─ Вася (VASYA) — scheduling                                  │    │
+│  │  ├─ Стас (MANAGER) — analytics / chief of staff                │    │
+│  │  └─ Кирилл (PRODUCER) — orchestrator                           │    │
+│  └──────────────────────────────────────────────────────────────────┘    │
+│                                                                            │
+│  ┌──────────────────────────────────────────────────────────────────┐    │
+│  │  ORCHESTRATION                                                   │    │
+│  │  ├─ pipeline.py — run chains non-interactively                 │    │
+│  │  │  • Checkpoint/resume logic                                   │    │
+│  │  │  • Context propagation                                       │    │
+│  │  │  • Webhook callback to n8n                                   │    │
+│  │  ├─ office.py — CLI menu for manual agent launch               │    │
+│  │  └─ webapp.py — browser UI (Flask app)                         │    │
+│  └──────────────────────────────────────────────────────────────────┘    │
+│                                                                            │
+└────────────────────────────────────────────────────────────────────────────┘
+                                   ▲
+                                   │
+                ┌──────────────────┼──────────────────┐
+                ▼                  ▼                  ▼
+     ┌─────────────────┐ ┌─────────────────┐ ┌──────────────┐
+     │  File System    │ │  Memory JSON    │ │  Logs (JSONL)│
+     │  (MILA-BUSINESS)│ │  (locking safe) │ │              │
+     │  (tools/)       │ │                 │ │ errors.jsonl │
+     │  (products/)    │ │ context.json    │ │ events.jsonl │
+     └─────────────────┘ │ profile.json    │ │ chain_*.log  │
+                         │ events.jsonl    │ └──────────────┘
+                         └─────────────────┘
+
+
+2. DATA FLOW — FROM USER TO AGENT RESPONSE
+============================================
+
+SCENARIO 1: Interactive Chat (Browser)
+──────────────────────────────────────
+
+USER (Browser)
+  │
+  ├─→ types message in "Marina" tab
+  │
+  └─→ POST /api/agent/marina/message
+      {
+        "message": "Напиши 3 поста про тревогу",
+        "session_id": "abc123",
+        "chain_id": "optional_existing_chain"
+      }
+      │
+      ├─→ session_manager.get_history("marina", session_id)
+      │   → returns [{"role": "user", "content": "..."}]
+      │
+      ├─→ system_prompt_builder.extract_context_from_message()
+      │   → finds [from:agent] tags if present
+      │
+      ├─→ base.compose_system("marina", MARINA_SYSTEM, context)
+      │   → adds phase info + prompt overrides + brand voice
+      │
+      ├─→ base.run_agent(client, system, tools, handle, msg, history)
+      │   │
+      │   ├─→ client.messages.create(system=system, messages=...)
+      │   │
+      │   ├─→ Model sees:
+      │   │   • System prompt (with context if present)
+      │   │   • Available tools (JSON schemas)
+      │   │   • Message history
+      │   │
+      │   ├─→ Model responds: "Вот 3 поста..." (with tool calls)
+      │   │
+      │   ├─→ for tool_call in response:
+      │   │   ├─→ marina.handle(tool_name, args)
+      │   │   │   • read_file("02-content/...")
+      │   │   │   • write_file(...)
+      │   │   │   • run_command("python tools/...")
+      │   │   │
+      │   │   └─→ append tool result to messages
+      │   │
+      │   └─→ repeat until model stops calling tools
+      │
+      ├─→ memory.log_event("agent:message", {...})
+      │   → appends to events.jsonl
+      │
+      ├─→ session_manager.save_history("marina", session_id, history)
+      │   → saves updated chat history
+      │
+      └─→ return {"reply": "Вот посты...", "context": {...}}
+          │
+          └─→ Browser displays reply + next actions buttons
+
+
+SCENARIO 2: Chain from n8n Workflow
+────────────────────────────────────
+
+n8n (Remote)
+  │
+  ├─→ HTTP POST http://127.0.0.1:5052/api/n8n/trigger-chain
+      {
+        "chain_config": {
+          "agents": ["olya", "marina", "victoria", "vasya"]
+        },
+        "from_agent": "n8n",
+        "chain_id": "content_week_2026_06_08_001"
+      }
+      │
+      ├─→ n8n_webhook.py receives & validates
+      │   ├─→ checks Authorization header
+      │   ├─→ creates ChainExecution object
+      │   └─→ spawns subprocess: python pipeline.py content_week
+      │
+      ├─→ pipeline.py runs chain non-interactively:
+      │   │
+      │   ├─→ for position, agent_key in enumerate(agents):
+      │   │   │
+      │   │   ├─→ build context:
+      │   │   │   {
+      │   │   │     "from_agent": agents[position-1] or "system",
+      │   │   │     "chain_id": "content_week_2026_06_08_001",
+      │   │   │     "position": position,
+      │   │   │     "is_final": position == len(agents)-1
+      │   │   │   }
+      │   │   │
+      │   │   ├─→ base.run_agent(client, system, tools, handle, msg, history)
+      │   │   │   (same as scenario 1)
+      │   │   │
+      │   │   ├─→ save_checkpoint(chain_name, {"completed": [agents[:pos]]})
+      │   │   │   → allows resume on failure
+      │   │   │
+      │   │   └─→ memory.log_event("chain:step", {agent, status, duration})
+      │   │
+      │   └─→ memory.log_event("chain:end", {status: "ok|failed"})
+      │
+      ├─→ n8n_webhook.py detects completion
+      │   │
+      │   └─→ POST to N8N_STATUS_WEBHOOK_URL
+          {
+            "ok": true,
+            "chain_id": "content_week_2026_06_08_001",
+            "status": "success",
+            "result": "5 posts scheduled..."
+          }
+          │
+          └─→ n8n continues next steps (email, Telegram, etc)
+
+
+3. AGENT-TO-AGENT CONTEXT FLOW
+===============================
+
+Chain: OLYA → MARINA → VICTORIA → VASYA
+
+┌─────────────────────────────────────────────────────────────────┐
+│ STEP 1: OLYA (Trends Research)                                  │
+│ ─────────────────────────────────────────────────────────────   │
+│ Context received:                                               │
+│   from_agent: "n8n"                                             │
+│   position: 0                                                   │
+│   is_final: false                                               │
+│   next: "marina"                                                │
+│                                                                 │
+│ System prompt includes:                                         │
+│   • Base OLYA_SYSTEM                                            │
+│   • "Ты ПЕРВАЯ в цепочке (#1), результат пойдет marina"       │
+│   • Phase context ("Анализируй как обычно...")                 │
+│   • Brand voice                                                 │
+│                                                                 │
+│ Output: trends_week.md                                          │
+│ Verdict: [VERDICT: ready_next] [→ marina]                      │
+│                                                                 │
+│ NEXT_CONTEXT = {                                                │
+│   from_agent: "olya",                                           │
+│   to_agent: null,                                               │
+│   chain_id: "...",                                              │
+│   position: 1,                                                  │
+│   is_final: false,                                              │
+│   previous: "olya"                                              │
+│ }                                                                │
+└─────────────────────────────────────────────────────────────────┘
+                             ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ STEP 2: MARINA (Content Writer)                                 │
+│ ─────────────────────────────────────────────────────────────   │
+│ Context received: NEXT_CONTEXT (built by pipeline)              │
+│                                                                 │
+│ System prompt includes:                                         │
+│   • Base MARINA_SYSTEM                                          │
+│   • "✓ Ты получила запрос от: olya"                            │
+│   • "✓ Следующий агент: victoria"                             │
+│   • "После твоей работы результат пойдет victoria"             │
+│   • Brand voice (MARINA-specific)                              │
+│   • Prompt overrides from prompt_overrides/marina.md           │
+│                                                                 │
+│ Marina knows:                                                   │
+│   ✓ What Olya found (read trends_week.md)                      │
+│   ✓ What's expected next (Victoria will edit)                  │
+│   ✓ Full chain context (for audit/retry)                       │
+│                                                                 │
+│ Output: 5 draft posts                                           │
+│ Verdict: [VERDICT: ready_next]                                 │
+└─────────────────────────────────────────────────────────────────┘
+                             ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ STEP 3: VICTORIA (Editor)                                       │
+│ ─────────────────────────────────────────────────────────────   │
+│ Context received:                                               │
+│   from_agent: "marina"                                          │
+│   position: 2                                                   │
+│   next: "vasya"                                                 │
+│   is_final: false                                               │
+│                                                                 │
+│ System prompt includes:                                         │
+│   • Base VICTORIA_SYSTEM                                        │
+│   • "✓ Ты получила запрос от: marina"                          │
+│   • "✓ Следующий агент: vasya"                                │
+│   • Victoria knows: Marina is biased (she's the author)        │
+│   • Should review stricter                                      │
+│                                                                 │
+│ Victoria action:                                                │
+│   1. Read Marina's posts                                        │
+│   2. Check grammar, tone, brand voice                           │
+│   3. Prepare for Vasya (scheduling)                             │
+│                                                                 │
+│ Output: Edited posts (marked ready for publishing)              │
+│ Verdict: [VERDICT: ready_next] [→ vasya]                       │
+└─────────────────────────────────────────────────────────────────┘
+                             ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ STEP 4: VASYA (Scheduler)                                       │
+│ ─────────────────────────────────────────────────────────────   │
+│ Context received:                                               │
+│   from_agent: "victoria"                                        │
+│   position: 3                                                   │
+│   next: null                                                    │
+│   is_final: true ← LAST AGENT                                  │
+│                                                                 │
+│ System prompt includes:                                         │
+│   • Base VASYA_SYSTEM                                           │
+│   • "✓ ТЫ ПОСЛЕДНЯЯ В ЦЕПОЧКЕ"                                │
+│   • "Проверь качество перед завершением"                       │
+│                                                                 │
+│ Vasya action:                                                   │
+│   1. Read edited posts from Victoria                            │
+│   2. Schedule to Instagram (via tools/post_content.py)          │
+│   3. Update content-plan.md                                     │
+│   4. Final verification                                         │
+│                                                                 │
+│ Output: Posts scheduled, calendar updated                       │
+│ Verdict: [VERDICT: done] ← CHAIN COMPLETE                      │
+└─────────────────────────────────────────────────────────────────┘
+                             ▼
+                       CHAIN COMPLETE
+                     All outputs saved to
+                     MILA-BUSINESS files
+                     Memory events logged
+                     n8n webhook called
+
+
+4. CHAIN DASHBOARD — TIMELINE VIEW
+===================================
+
+Chain ID: content_week_2026_06_08_001
+Status: SUCCESS (completed)
+Started: 10:22:45 UTC
+Ended: 10:35:12 UTC
+Total: 12m 27s
+
+  ◆━ OLYA (10:22-10:25)                  ✓ DONE       [2m 47s]
+  ──┃
+  ├─ Input: (trigger from n8n)
+  ├─ Output: trends_week.md (1.2 KB)
+  ├─ Verdict: ready_next
+  └─ Tools called: read_file(2x), write_file(1x)
+
+  ◆━ MARINA (10:25-10:31)                ✓ DONE       [6m 12s] ← SLOWEST
+  ──┃
+  ├─ Input: trends_week.md
+  ├─ Output: posts/week_2026_06_08.md (4.8 KB)
+  ├─ Verdict: ready_next
+  ├─ LLM calls: 1 (Claude Opus, 4.2 KB output)
+  └─ Tools called: read_file(3x), write_file(2x), run_command(1x)
+
+  ◆━ VICTORIA (10:31-10:33)              ✓ DONE       [1m 38s]
+  ──┃
+  ├─ Input: posts/week_2026_06_08.md
+  ├─ Output: posts/week_2026_06_08_edited.md (4.9 KB, with review)
+  ├─ Verdict: ready_next
+  ├─ LLM calls: 1 (Gemini Flash, faster)
+  └─ Tools called: read_file(2x), write_file(1x), generate_image(1x)
+
+  ◆━ VASYA (10:33-10:35)                 ✓ DONE       [1m 50s]
+  ──┃
+  ├─ Input: posts/week_2026_06_08_edited.md
+  ├─ Output: content-plan.md updated + Instagram scheduled
+  ├─ Verdict: done ← FINAL
+  ├─ LLM calls: 1 (brief scheduling confirmation)
+  └─ Tools called: read_file(2x), write_file(2x), run_command(2x)
+
+Performance Metrics:
+  • Total duration: 747s
+  • Avg per agent: 186s
+  • Slowest: Marina (372s)
+  • Fastest: Victoria (98s)
+  • LLM calls: 4 total
+  • Tools used: 16 total
+  • Success rate: 100%
+
+
+5. ERROR RECOVERY — RETRY WITH ESCALATION
+===========================================
+
+Scenario: Marina's Instagram API call fails (429 rate limit)
+
+┌─────────────────────────────────────────────────────────────┐
+│ ATTEMPT 1 (Marina, T=10:25)                                 │
+│ ─────────────────────────────────────────────────────────   │
+│ Action: Run agent → write post → call Instagram API         │
+│ Result: ✗ FAIL (429 Too Many Requests)                      │
+│ Error logged: logs/errors.jsonl                             │
+│                                                              │
+│ Decision: Is it retryable?                                  │
+│   • 429 = rate limit (YES, transient)                       │
+│   • max_retries = 3, attempt = 1                           │
+│   • Action: SLEEP 1s, RETRY                                 │
+└─────────────────────────────────────────────────────────────┘
+                             ▼ wait 1s
+┌─────────────────────────────────────────────────────────────┐
+│ ATTEMPT 2 (Marina, T=10:26)                                 │
+│ ─────────────────────────────────────────────────────────   │
+│ Action: Retry Instagram API call                            │
+│ Result: ✗ FAIL (429 still rate limited)                     │
+│ Error logged                                                 │
+│                                                              │
+│ Decision: Retry again?                                      │
+│   • attempt = 2 < max_retries = 3                          │
+│   • Action: SLEEP 2s, RETRY                                 │
+└─────────────────────────────────────────────────────────────┘
+                             ▼ wait 2s
+┌─────────────────────────────────────────────────────────────┐
+│ ATTEMPT 3 (Marina, T=10:28)                                 │
+│ ─────────────────────────────────────────────────────────   │
+│ Action: Retry Instagram API call                            │
+│ Result: ✗ FAIL (still 429)                                  │
+│ Error logged                                                 │
+│                                                              │
+│ Decision: Give up agent retry?                              │
+│   • attempt = 3 = max_retries                              │
+│   • Error type: API rate limit (could wait longer)          │
+│   • But: we're on 3rd attempt already                       │
+│   • Action: ESCALATE to different agent (Rita)              │
+└─────────────────────────────────────────────────────────────┘
+                             ▼
+┌─────────────────────────────────────────────────────────────┐
+│ ESCALATION (Rita, T=10:28)                                  │
+│ ─────────────────────────────────────────────────────────   │
+│ Context from Marina:                                        │
+│   • Chain ID: content_week_...                             │
+│   • Failed at: publishing step                              │
+│   • Input: 5 draft posts ready                              │
+│                                                              │
+│ Rita receives system prompt with:                           │
+│   "Предыдущий агент Marina не смог опубликовать.           │
+│    Instagram API был в rate limit.                          │
+│    Попробуй альтернативный подход:"                        │
+│                                                              │
+│ Rita's options:                                             │
+│   1. Save as scheduled (not instant post)                   │
+│   2. Use Threads instead (separate API limit)               │
+│   3. Wait 1 hour & retry Marina (manual)                    │
+│                                                              │
+│ Rita's action: "Сохраняю посты как черновики для           │
+│                  публикации после перезагрузки API."        │
+│ Result: ✓ SUCCESS (saved, will retry later)                │
+└─────────────────────────────────────────────────────────────┘
+                             ▼
+           Chain continues with Vasya (scheduler)
+           He sees posts are in "draft" state
+           Adjusts timeline: "публиковать после 11:30"
+
+
+6. n8n WEBHOOK INTEGRATION
+===========================
+
+n8n Workflow Timeline:
+
+[Monday 09:00] Schedule Trigger fires
+      │
+      ├─→ Create chain_id = "content_week_2026_06_08_001"
+      │
+      ├─→ HTTP POST http://localhost:5052/api/n8n/trigger-chain
+      │   {
+      │     "chain_config": {
+      │       "agents": ["olya", "marina", "victoria", "vasya"]
+      │     },
+      │     "chain_id": "content_week_2026_06_08_001"
+      │   }
+      │
+      └─→ Response: {"ok": true, "status": "pending"}
+          │
+          └─→ n8n webhook server background spawns:
+              subprocess: python pipeline.py content_week
+              │
+              ├─→ Polls: curl /chains/api/active
+              │   Watch: "current_agent": "olya" → "marina" → ...
+              │
+              └─→ [WAIT UP TO 300s FOR COMPLETION]
+
+[Parallel] Meanwhile, mila-office pipeline runs:
+      │
+      ├─→ OLYA (2m 47s) ✓
+      ├─→ MARINA (6m 12s) ✓
+      ├─→ VICTORIA (1m 38s) ✓
+      └─→ VASYA (1m 50s) ✓
+          Chain COMPLETE
+          │
+          └─→ logs to memory/events.jsonl:
+              {
+                "kind": "chain:end",
+                "chain_id": "content_week_2026_06_08_001",
+                "status": "ok",
+                "timestamp": "2026-06-08T10:35:12Z"
+              }
+
+[Back in n8n webhook]
+      ├─→ Detects: chain:end event in memory
+      │
+      └─→ POST to N8N_STATUS_WEBHOOK_URL
+          http://localhost:5678/webhook/office-done
+          {
+            "ok": true,
+            "chain_id": "content_week_2026_06_08_001",
+            "status": "success",
+            "progress": 100,
+            "result": "5 posts scheduled for week",
+            "timestamp": "2026-06-08T10:35:12Z"
+          }
+          │
+          └─→ n8n receives webhook
+              ├─→ Next step: Send Telegram notification
+              │   "📅 Неделя спланирована! 5 постов готовы."
+              │
+              ├─→ Next step: Update Google Sheet
+              │   Add row with metrics: 847 impressions, 45 likes, 3 comments
+              │
+              └─→ Next step: Optional — trigger Instagram auto-posting
+
+
+7. FILE OPERATIONS & PATHS
+===========================
+
+When agent calls: base.read_file("02-content/content-plan.md")
+
+Resolution:
+  1. Input path: "02-content/content-plan.md"
+  2. _apply_alias(path):
+     "02-content" → "MILA-BUSINESS/02-content" (from _FOLDER_ALIASES)
+  3. Full path: "MILA-BUSINESS/02-content/content-plan.md"
+  4. _safe_path():
+     Resolve within MILA_FOLDER (E:\MILA GOLD)
+     Check: resolved path is under MILA_FOLDER
+     → E:\MILA GOLD\MILA-BUSINESS\02-content\content-plan.md
+  5. Read file (max 40KB into context)
+  6. If larger than 40KB:
+     Return: [first 40KB] + "…[file truncated, request specific section]"
+
+Write operation: base.write_file("02-content/posts/new.md", content)
+  1. Input: "02-content/posts/new.md"
+  2. Apply aliases: "02-content" → "MILA-BUSINESS/02-content"
+  3. Safe path: E:\MILA GOLD\MILA-BUSINESS\02-content\posts\new.md
+  4. Create parent dirs if missing: mkdir -p
+  5. Write to temp file: .tmp
+  6. Atomic rename: .tmp → final
+  7. Return: "✓ Сохранено: [full path]"
+
+Security: Path traversal prevention
+  ✗ Input: "../../../etc/passwd"
+  → Resolves to: E:\MILA GOLD\..\..\etc\passwd
+  → Check fails: not under MILA_FOLDER
+  → Raise ValueError("Path outside workspace")
+
+  ✓ Input: "02-content/../../../etc/passwd"
+  → Resolves to: E:\etc\passwd
+  → Check fails: not under MILA_FOLDER
+  → Raise ValueError("Path outside workspace")
+
+
+8. MEMORY SHARING & LOCKING
+============================
+
+Memory files (under mila-office/memory/):
+
+┌─────────────────────────────────────────────────────────────┐
+│ SHARED STATE (inter-process via file locking)               │
+└─────────────────────────────────────────────────────────────┘
+
+context.json
+  Latest input from n8n or user
+  {
+    "kind": "new_client",
+    "from": "telegram",
+    "data": {"name": "Маша", ...},
+    "timestamp": "2026-06-08T10:22:45Z"
+  }
+
+  When agent starts: reads context.json to understand trigger
+  When n8n sends new event: overwrites context.json (atomic)
+
+  Locking: _FileLock prevents concurrent writes
+
+profile.json
+  Office profile (stable, not per-event)
+  {
+    "business": {
+      "brand": "@liudmyla.lykova",
+      "phase_override": null,
+      "ig_followers": 1300,
+      ...
+    },
+    "positioning": {...}
+  }
+
+  When agent starts: reads profile → sets defaults
+  Updated manually or by Manager agent
+  NOT overwritten per event (unlike context.json)
+
+events.jsonl
+  Append-only audit log (one event per line)
+  [{"kind": "chain:start", ...}, {"kind": "chain:step", ...}, ...]
+
+  Agents append to this via memory.log_event()
+  Never overwritten, only appended
+  Dashboard reads this for timeline/metrics
+
+agent_notes.json
+  Agent-to-agent message queue
+  {
+    "notes": [
+      {
+        "from": "marina",
+        "to": "victoria",
+        "message": "Check post grammar",
+        "timestamp": "..."
+      }
+    ]
+  }
+
+  Marina writes: agent_notes.append({from: "marina", to: "victoria", ...})
+  Victoria reads: filter where to="victoria"
+  After processing: mark as read
+
+Locking mechanism (synchronous):
+  ┌─ base.py (run_agent, tools)
+  │  │
+  │  └─→ needs to write to memory
+  │     │
+  │     ├─→ acquire _FileLock(timeout=15s)
+  │     │   └─→ create file: .lock
+  │     │   └─→ if exists, exponential backoff
+  │     │   └─→ if timeout: assume dead process, force
+  │     │
+  │     ├─→ read JSON (atomic)
+  │     ├─→ modify
+  │     ├─→ write to temp file
+  │     ├─→ atomic rename (temp → final)
+  │     │
+  │     └─→ release _FileLock
+  │        └─→ delete .lock file
+  │
+  └─ Next agent can now acquire lock
+
+
+9. ERROR HANDLING FLOW
+======================
+
+Exception raised anywhere (agent, tool, API call)
+  │
+  ├─→ error_monitor.log_error(e, context={...}, alert=bool)
+  │   │
+  │   ├─→ Categorize error:
+  │   │   • config_error: Missing .env var (ANTHROPIC_API_KEY)
+  │   │   • policy_violation: Agent not allowed (policies.py)
+  │   │   • rate_limit: HTTP 429 (retry helps)
+  │   │   • timeout: 504, network timeout (retry helps)
+  │   │   • agent_error: Agent output invalid (escalate)
+  │   │   • task_failed: Agent can't complete (review)
+  │   │
+  │   ├─→ Write to logs/errors.jsonl:
+  │   │   {
+  │   │     "timestamp": "2026-06-08T10:45:23Z",
+  │   │     "error_type": "instagram_api.GraphError",
+  │   │     "error_message": "429 Too Many Requests",
+  │   │     "context": {
+  │   │       "agent": "marina",
+  │   │       "tool": "run_command",
+  │   │       "command": "python tools/post_content.py ..."
+  │   │     },
+  │   │     "traceback": "..."
+  │   │   }
+  │   │
+  │   └─→ If alert=True:
+  │       ├─→ POST to Telegram (TELEGRAM_ADMIN_CHAT_ID)
+  │       │   "⚠️ MILA Office Error\n{error_type}: {message}\nAgent: {agent}"
+  │       │
+  │       └─→ Log: "error_id" = UUID for reference
+  │
+  └─→ Decide: RETRY or ESCALATE or FAIL?
+      │
+      ├─→ If config_error: FAIL (no retry)
+      ├─→ If rate_limit: RETRY (exponential backoff)
+      ├─→ If agent_error: ESCALATE (different agent)
+      ├─→ If task_failed: LOG & ALERT (manual review)
+      └─→ If transient network: RETRY (up to 3 times)

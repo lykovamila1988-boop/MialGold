@@ -1,0 +1,169 @@
+FULL INTEGRATION GUIDE — QUICK SUMMARY
+======================================
+
+Location: mila-office/FULL_INTEGRATION_GUIDE.md
+Size: ~80 KB (2,039 lines)
+Last Updated: 2026-06-08
+
+WHAT'S COVERED:
+===============
+
+1. SYSTEM ARCHITECTURE OVERVIEW (Section 1)
+   • High-level component diagram
+   • Data flow through webapp, n8n, and pipeline
+   • File layout and structure
+   • Component responsibilities table
+
+2. CONTEXT FLOW THROUGH AGENTS (Section 2)
+   • What is context and why it matters
+   • Context extraction and injection
+   • Real-world "Content Week" chain example
+   • Context propagation code samples
+   • Context tags in messages
+
+3. DASHBOARD USAGE GUIDE (Section 3)
+   • How to access the dashboard (http://127.0.0.1:5000)
+   • Dashboard features (agent tabs, chain timeline, metrics)
+   • API endpoints (GET /chains/api/active, /history, /metrics, etc.)
+   • Web UI features (timeline view, error drill-down)
+   • Reading dashboard data from code
+
+4. RETRY & ERROR HANDLING (Section 4)
+   • Error detection and centralized logging (errors.jsonl)
+   • Retry strategies at agent, chain, and tool levels
+   • Error categorization (config, transient, agent, business logic)
+   • Full error flow example
+
+5. n8n INTEGRATION EXAMPLES (Section 5)
+   • Setup and prerequisites
+   • Triggering chains from n8n workflows
+   • Monitoring chain status (polling vs webhooks)
+   • Instagram analytics report automation
+   • Error handling in n8n
+   • Real-world "New Client" chain example
+
+6. TESTING STRATEGIES (Section 6)
+   • Unit testing single agents (with mocks)
+   • Integration testing full chains
+   • Load testing (10+ parallel chains)
+   • Error recovery testing
+   • Running tests with pytest
+   • Mocking external services
+
+7. TROUBLESHOOTING (Section 7)
+   • Common issues: agent timeout, permission errors, memory locks, session tokens
+   • Solutions with code examples
+   • Debug commands (curl, pytest, profiling)
+   • Performance profiling tools
+
+8. PERFORMANCE TUNING (Section 8)
+   • Agent response time optimization
+   • LLM choice (Gemini vs Claude) impact
+   • File I/O and caching strategies
+   • Database query optimization
+   • Memory management (history trim, event archival)
+   • Monitoring and metrics collection
+
+9. BEST PRACTICES FOR CHAIN DESIGN (Section 9)
+   • Chain design patterns (sequential, parallel, conditional, retry)
+   • Context design guidelines
+   • Agent handoff best practices (checklist)
+   • Error handling and degradation
+   • Checkpoint and resume strategy
+   • Chain design testing
+   • Monitoring and alerting rules
+
+APPENDIX: QUICK REFERENCE
+   • Command cheat sheet
+   • File locations table
+   • Environment variables
+   • Common API calls
+   • Debugging snippets
+
+KEY DIAGRAMS INCLUDED:
+======================
+• High-level architecture (Flask + 11 agents + external APIs)
+• Data flow (user → webapp → agent → memory → external)
+• Content Week chain example (Olya → Marina → Victoria → Vasya)
+• Chain dashboard UI mockup (timeline view, metrics table)
+• Error handling decision tree
+• n8n integration flow
+
+HOW TO USE THIS GUIDE:
+======================
+
+For Developers:
+  1. Start with Section 1 (Architecture) for big picture
+  2. Read Section 2 (Context) to understand agent communication
+  3. Section 6 (Testing) before deploying new chains
+  4. Section 9 (Best Practices) when designing workflows
+
+For DevOps / Maintainers:
+  1. Section 3 (Dashboard) for monitoring
+  2. Section 7 (Troubleshooting) for day-to-day issues
+  3. Section 8 (Performance) for optimization
+  4. Appendix (Quick Reference) for command lookups
+
+For n8n Workflow Engineers:
+  1. Section 1 (Architecture) to understand components
+  2. Section 5 (n8n Integration) for practical examples
+  3. Section 4 (Error Handling) for webhook callbacks
+  4. Appendix (API Calls) for curl examples
+
+For Debugging:
+  1. Section 7 (Troubleshooting) for common issues
+  2. Appendix (Debugging) for diagnostic commands
+  3. Section 8 (Performance) for profiling slow chains
+
+QUICK START COMMANDS:
+=====================
+# Start UI
+cd mila-office && python webapp.py
+
+# Start n8n bridge
+cd mila-office && python n8n_webhook.py
+
+# Run chain
+python pipeline.py content_week --notify
+
+# View active chains
+curl http://localhost:5000/chains/api/active | jq
+
+# View errors
+tail -f logs/errors.jsonl
+
+# View chain logs
+tail -f mila-office/logs/chain_*.log
+
+# Check API setup
+cd tools && python check_setup.py
+
+RELATED FILES:
+==============
+• base.py                          — Core infrastructure
+• memory.py                        — Shared state
+• pipeline.py                      — Chain runner
+• n8n_webhook.py                   — n8n bridge
+• chain_dashboard.py               — Dashboard UI
+• error_monitor.py                 — Error logging
+• tests/                           — Test suite
+• comprehensive_test_suite.py      — Full integration tests
+• N8N_INSTAGRAM_REPORTS.md         — n8n analytics workflow
+
+STILL NEED HELP?
+================
+1. Check Section 7 (Troubleshooting) first
+2. Search guide for specific keyword (Ctrl+F in editor)
+3. Review relevant section for your use case
+4. Run debug commands from Appendix
+5. Check logs/errors.jsonl for detailed error info
+
+Questions about:
+  • Architecture? → Section 1
+  • Context? → Section 2
+  • Monitoring? → Section 3
+  • Failures? → Section 4, 7
+  • n8n? → Section 5
+  • Tests? → Section 6
+  • Speed? → Section 8
+  • Design? → Section 9
