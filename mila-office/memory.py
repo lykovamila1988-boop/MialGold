@@ -1280,6 +1280,74 @@ def get_posts_pending_approval() -> list:
     return [p for p in posts.values() if p.get("status") not in ("approved", "published")]
 
 
+# ─── UNIFIED MESSAGE QUEUE: асинхронная отправка сообщений (Instagram comments, Telegram, Threads) ──────────
+
+MESSAGE_QUEUE = MEM_DIR / "message_queue.jsonl"
+
+def queue_message(channel: str, text: str, confirm: bool = False, metadata: dict = None) -> dict:
+    """
+    Поставить сообщение в очередь для асинхронной отправки.
+
+    Параметры:
+    - channel: "instagram_comments", "telegram", "threads"
+    - text: текст сообщения
+    - confirm: False → отправить сразу, True → черновик до подтверждения
+    - metadata: доп. данные (post_id, user_id, etc)
+
+    Возвращает информацию о сообщении (id, статус, и т.д.)
+    """
+    msg_id = f"msg_{int(time.time() * 1000)}"
+    msg = {
+        "id": msg_id,
+        "channel": channel,
+        "text": text,
+        "status": "pending" if not confirm else "draft",
+        "confirm": confirm,
+        "created_at": _now(),
+        "metadata": metadata or {}
+    }
+
+    if confirm:
+        # Черновик — возвращаем для подтверждения
+        return {
+            "status": "draft",
+            "message": f"📋 ЧЕРНОВИК ({channel}):\n\n{text}\n\nСкажи 'подтверди' чтобы опубликовать",
+            "id": msg_id
+        }
+
+    # Отправить в очередь
+    with _FileLock():
+        try:
+            with open(MESSAGE_QUEUE, "a", encoding="utf-8") as f:
+                json.dump(msg, f, ensure_ascii=False)
+                f.write("\n")
+        except Exception as e:
+            log_event("message_queue:error", {"error": str(e)})
+            return {"status": "error", "message": f"Ошибка при добавлении в очередь: {e}"}
+
+    log_event("message:queued", {"msg_id": msg_id, "channel": channel})
+    return {"status": "queued", "message": "✓ В очередь", "id": msg_id}
+
+
+def get_pending_messages(channel: str = None, limit: int = 10) -> list:
+    """Получить ожидающие отправки сообщения."""
+    messages = []
+    try:
+        if not MESSAGE_QUEUE.exists():
+            return []
+        with open(MESSAGE_QUEUE, "r", encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                msg = json.loads(line)
+                if msg.get("status") == "pending":
+                    if channel is None or msg.get("channel") == channel:
+                        messages.append(msg)
+    except Exception:
+        pass
+    return messages[:limit]
+
+
 if __name__ == "__main__":
     # Быстрый самотест без сети и без LLM.
     print("MEM_DIR:", MEM_DIR)

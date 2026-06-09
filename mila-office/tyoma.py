@@ -1,6 +1,7 @@
 """Тёма — Telegram-менеджер. python tyoma.py"""
 from base import *
 from shared_tools import telegram_send, telegram_get_updates, telegram_channel_stats
+import memory
 
 SYSTEM = """Ты — Тёма, менеджер Telegram-канала Людмилы Лыковой (@liudmyla.lykova).
 
@@ -30,18 +31,31 @@ SYSTEM = """Ты — Тёма, менеджер Telegram-канала Людми
 - Это покажет членов канала и основные метрики
 - На основе этого предложи 2-3 конкретных шага для роста (время публикации, тип контента, etc)
 
+ОЧЕРЕДЬ СООБЩЕНИЙ:
+- Когда пишешь сообщение: используй send_to_queue() (асинхронно, без лишних диалогов)
+- send_to_queue() поставит в очередь и скажет статус
+- Это согласовано с Marina для Instagram comments — единая архитектура!
+
 ВАЖНО: Никогда не публикуй без подтверждения если не сказано явно."""
+
+def send_to_queue(text, channel_id="", chat_id=""):
+    """Поставить Telegram-сообщение в очередь (асинхронно, как Marina комментарии)."""
+    return memory.queue_message(
+        "telegram",
+        text,
+        confirm=False,
+        metadata={"channel_id": channel_id or chat_id}
+    )
 
 TOOLS = core_tools("Читать контент для публикации",
                    "Сохранить черновик или лог",
                    "Показать файлы Telegram",
                    list_default="04-telegram") + [
-    {"name": "telegram_send", "description": "Отправить сообщение в Telegram канал",
+    {"name": "send_to_queue", "description": "Поставить сообщение в очередь для отправки в Telegram",
      "input_schema": {"type": "object", "properties": {
-         "chat_id": {"type": "string", "description": "ID канала, например @mila_channel"},
          "text": {"type": "string", "description": "Текст сообщения"},
-         "confirm": {"type": "boolean", "description": "Требует подтверждения", "default": True}
-     }, "required": ["chat_id", "text"]}},
+         "channel_id": {"type": "string", "description": "ID канала (опционально)"}
+     }, "required": ["text"]}},
     {"name": "telegram_get_updates", "description": "Получить новые сообщения боту (ХОЧУ и вопросы)",
      "input_schema": {"type": "object", "properties": {}}},
     {"name": "telegram_channel_stats", "description": "Получить статистику канала",
@@ -49,7 +63,7 @@ TOOLS = core_tools("Читать контент для публикации",
 ]
 
 def handle(name, inp):
-    if name == "telegram_send": return telegram_send(inp["chat_id"], inp["text"], inp.get("confirm", True))
+    if name == "send_to_queue": return send_to_queue(inp.get("text", ""), inp.get("channel_id", ""))
     if name == "telegram_get_updates": return telegram_get_updates()
     if name == "telegram_channel_stats": return telegram_channel_stats(inp.get("chat_id", ""))
     res = core_handle(name, inp, list_default="04-telegram")

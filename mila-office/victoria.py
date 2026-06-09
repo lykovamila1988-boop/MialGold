@@ -163,7 +163,28 @@ QUICK = {
     "/посты":     "Прочитай все файлы из content/posts/ и оцени каждый по шкале 1-10",
     "/стиль":     "Объясни как звучит голос Людмилы — дай 3 примера правильного и неправильного",
     "/файлы":     "Покажи что есть в папке для проверки",
+    "/сообщения": "Покажи сообщения от других агентов (Лера, Марина и т.д.)",
 }
+
+# При запуске Victoria, показать входящие сообщения
+def _get_pending_messages():
+    """Получить сообщения для Victoria от других агентов."""
+    try:
+        from mila_office import memory
+        messages = memory.get_agent_messages("victoria", status="pending")
+        if messages:
+            msg_list = []
+            for msg in messages[:3]:  # Показать последние 3
+                msg_list.append(f"📮 От {msg.get('from_agent')} ({msg.get('subject')}):\n{msg.get('question', '')[:200]}")
+            return "\n\n".join(msg_list)
+        return None
+    except:
+        return None
+
+# Добавить сообщения в систему prompt если есть входящие
+_pending = _get_pending_messages()
+if _pending:
+    SYSTEM += f"\n\n⚠️ ВХОДЯЩИЕ СООБЩЕНИЯ:\n{_pending}"
 
 if __name__ == "__main__":
     chat_loop("Виктория", "✍️", "green", SYSTEM, TOOLS, handle, QUICK)
