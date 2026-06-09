@@ -412,14 +412,91 @@ def run_tool(name: str, inputs: dict) -> str:
 
 def handle(name: str, inputs: dict) -> str:
     """Унифицированный интерфейс handle() для интеграции с webapp.py и pipeline.py.
-    Остальные агенты используют handle(name, inputs) — Marina теперь тоже."""
+    Остальные агенты используют handle(name, inputs) — Marina теперь тоже.
+
+    Аргументы:
+        name: имя инструмента (read_file, instagram_get_analytics, итд)
+        inputs: параметры инструмента + опциональный контекст
+
+    Контекст (_context):
+        Если в inputs есть ключ '_context', это словарь с информацией о цепочке:
+        - from_agent (str): кто отправил запрос (другой агент или 'user')
+        - to_agent (str, опц): кому адресован результат
+        - chain_id (str, опц): идентификатор цепочки обработки
+
+    Примеры использования:
+
+        # Пример 1: Просто вызови инструмент (нет контекста)
+        inputs = {'path': 'MILA-BUSINESS/02-content/content-plan.md'}
+        handle('read_file', inputs)
+
+        # Пример 2: Запрос от другого агента (Виктория)
+        inputs = {
+            'path': 'posts/edited.txt',
+            '_context': {
+                'from_agent': 'victoria',
+                'chain_id': 'week_2026_06_08'
+            }
+        }
+        handle('read_file', inputs)
+        # Марина видит что Виктория отредактировала файл, может учесть в стратегии
+
+        # Пример 3: Аналитика с контекстом (от Олеси/тренды, результат Виктории)
+        inputs = {
+            'posts_limit': 5,
+            '_context': {
+                'from_agent': 'olya',
+                'to_agent': 'victoria',
+                'chain_id': 'week_2026_06_08'
+            }
+        }
+        handle('instagram_get_comments', inputs)
+        # Марина получает комментарии, зная что это нужно для аналитики трендов
+    """
+    # Извлекаем контекст если есть
+    context = inputs.get('_context', {})
+    if context and context.get('from_agent') != 'user':
+        from_agent = context.get('from_agent', 'user')
+        chain_id = context.get('chain_id')
+        # Можно логировать: console.print(f"[dim]{from_agent} → marina{f' [{chain_id}]' if chain_id else ''}[/dim]")
+
+    # Вызываем инструмент (контекст передадим в run_agent если нужно)
     return run_tool(name, inputs)
 
 
-def run_agent(user_message: str, history: list):
+def run_agent(user_message: str, history: list, context: dict = None):
     """Делегирует в общий base.run_agent — единый tool-use цикл для всех агентов
-    (модель/лимит токенов берутся из base, печать tool-вызовов — тоже там)."""
-    return base.run_agent(client, SYSTEM_PROMPT, TOOLS, run_tool, user_message, history, agent_key="marina")
+    (модель/лимит токенов берутся из base, печать tool-вызовов — тоже там).
+
+    Аргументы:
+        user_message: входящее сообщение
+        history: история сообщений (дополняется на месте)
+        context: опциональный контекст цепочки {from_agent, to_agent, chain_id}
+                 если контекст есть, он добавляется в system prompt
+
+    Примеры:
+
+        # Обычный вызов (прямой запрос от пользователя)
+        run_agent("Напиши пост про выбор", [])
+
+        # С контекстом от другого агента
+        context = {
+            'from_agent': 'victoria',
+            'chain_id': 'week_2026_06_08'
+        }
+        run_agent("Проанализируй эти посты", [], context=context)
+        # Система prompt обновится с информацией о контексте
+
+        # С полным контекстом (от кого, кому, цепочка)
+        context = {
+            'from_agent': 'olya',
+            'to_agent': 'victoria',
+            'chain_id': 'week_2026_06_08'
+        }
+        run_agent("Создай контент на основе трендов", [], context=context)
+    """
+    return base.run_agent(client, SYSTEM_PROMPT, TOOLS, run_tool, user_message, history,
+                         agent_key="marina", context=context)
 
 # ─── CLI INTERFACE ───────────────────────────────────────
 

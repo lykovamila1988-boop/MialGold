@@ -1,0 +1,411 @@
+================================================================================
+                    VASYA CHAIN_ID TRACKING — FLOW DIAGRAMS
+================================================================================
+
+DIAGRAM 1: Basic Scheduling Flow
+──────────────────────────────────────────────────────────────────────────────
+
+  User Request                    Vasya Processing                 Storage
+  ────────────                   ─────────────────                ───────
+
+  /план (weekly)
+       │
+       ├─→ Analyze content-plan.md
+       │
+       ├─→ Generate chain_id = "vasya_20260609_weekly_f3a2c1"
+       │
+       ├─→ For each day (Mon-Fri):
+       │  │
+       │  ├─→ schedule_post(
+       │  │     url, caption, time,
+       │  │     chain_id=<above>,
+       │  │     post_type="photo"
+       │  │   )
+       │  │     │
+       │  │     ├─→ Validate (URL, caption)
+       │  │     │
+       │  │     ├─→ Call pipeline.enqueue(..., chain_id=...)  ──→ Queue
+       │  │     │
+       │  │     ├─→ Log decision  ────────────────────────────→ logs/scheduler.log
+       │  │     │   [timestamp] chain_id=vasya_... action=schedule reason=queued
+       │  │     │
+       │  │     └─→ Save state  ──────────────────────────────→ reports/schedules/<chain_id>.json
+       │  │         {posts: [...], decisions: [...], errors: []}
+       │  │
+       │  └─→ Continue to next day
+       │
+       └─→ Return summary with chain_id
+
+
+================================================================================
+DIAGRAM 2: Decision Logic with Chain Tracking
+──────────────────────────────────────────────────────────────────────────────
+
+                              START
+                                │
+                    ┌───────────┴───────────┐
+                    │                       │
+              Is content ready?       (Check Victoria approval)
+                    │                       │
+                   YES                      NO
+                    │                       │
+                    │                  Log: action=skip
+                    │                       reason=content_not_ready
+                    │                       │
+              Is media available?          │
+                    │                       │
+           ┌────────┴────────┐             │
+          YES               NO             │
+           │                 │             │
+           │            Log: action=skip   │
+           │                 │             │
+           │            reason=no_media    │
+           │                 │             │
+      What time?             │             │
+           │                 │             │
+      ┌────┴────┐            │             │
+     Mon    Friday?           │             │
+      │        │              │             │
+      │    OFFER             │             │
+      │    Time=14:00         │             │
+      │    Log: reason=      │             │
+      │    "friday_offer"    │             │
+      │        │              │             │
+      └────┬───┴──────────────┤─────────────┘
+           │                  │
+           └─→ Call schedule_post
+               │
+               ├─→ Save to queue
+               │
+               ├─→ Log with chain_id
+               │
+               ├─→ Save state
+               │
+               └─→ DONE
+
+
+================================================================================
+DIAGRAM 3: Error Handling & Recovery
+──────────────────────────────────────────────────────────────────────────────
+
+  Schedule 5 posts with chain_id="vasya_weekly_f3a2c1"
+
+  Post 1: URL=https://...jpg ─→ ✓ queued
+  Post 2: URL=https://...mp4 ─→ ✓ queued
+  Post 3: URL="" (empty!)    ─→ ✗ ERROR: no_media_url
+                                 └─→ Log error to logs/scheduler.log
+                                 └─→ Save to state['errors']
+  Post 4: URL=https://...jpg ─→ ✓ queued (continues after error)
+  Post 5: URL=https://...jpg ─→ ✓ queued
+
+  State saved:
+  {
+    "posts": [
+      {"id": "uuid-001", "status": "queued"},
+      {"id": "uuid-002", "status": "queued"},
+      {"id": "uuid-004", "status": "queued"},
+      {"id": "uuid-005", "status": "queued"}
+    ],
+    "errors": [
+      {
+        "timestamp": "2026-06-08T14:31:00",
+        "post_id": "uuid-003",
+        "error": "Ошибка: нужна публичная ссылка на медиа..."
+      }
+    ]
+  }
+
+  Later, user can:
+  1. Load state: state = _load_chain_state("vasya_weekly_f3a2c1")
+  2. See errors: state['errors']
+  3. Resubmit failed post with correct URL
+  4. All in same chain for full history
+
+
+================================================================================
+DIAGRAM 4: Multi-Chain Timeline
+──────────────────────────────────────────────────────────────────────────────
+
+  Time ──────────────────────────────────────────────────────────
+
+  14:30  chain_id=vasya_weekly_f3a2c1 starts
+           │ schedule Mon     ─→ queued
+           │ schedule Tue     ─→ queued
+           │ schedule Wed     ─→ queued
+           │ schedule Thu     ─→ queued
+           │ schedule Fri     ─→ queued
+           └─ chain complete (5 posts, 0 errors)
+
+  15:00  chain_id=vasya_daily_x7y2z9 starts
+           │ schedule story 1 ─→ queued
+           │ schedule story 2 ─→ queued
+           └─ chain complete (2 posts, 0 errors)
+
+  15:30  chain_id=vasya_monday_brief_abc starts
+           │ schedule Monday   ─→ queued
+           └─ chain complete (1 post, 0 errors)
+
+  Each chain is independent:
+  • Different chain_id
+  • Different state file
+  • Different log entries
+  • Can be rescheduled/cancelled independently
+
+
+================================================================================
+DIAGRAM 5: Reschedule Entire Chain
+──────────────────────────────────────────────────────────────────────────────
+
+  Original chain: vasya_20260609_weekly_f3a2c1
+  Posts scheduled for:
+    2026-06-09 10:00 (Mon)
+    2026-06-10 10:00 (Tue)
+    2026-06-11 10:00 (Wed)
+    2026-06-12 10:00 (Thu)
+    2026-06-13 10:00 (Fri)
+
+  User: "Перепланируй на час раньше"
+
+  Vasya:
+    1. Load state: state = _load_chain_state("vasya_20260609_weekly_f3a2c1")
+    2. Generate new chain_id: "vasya_20260609_rescheduled_x9y2z1"
+    3. For each post in original:
+         old_time: 2026-06-09 10:00
+         new_time: 2026-06-09 09:00  (1 hour earlier)
+         Call schedule_post(..., chain_id="vasya_20260609_rescheduled_x9y2z1")
+    4. Log each reschedule:
+         action=reschedule reason=moved_1h_earlier
+    5. Save new chain state
+
+  Result: Two chains in history
+    Chain 1 (original):      5 posts at 10:00
+    Chain 2 (rescheduled):   5 posts at 09:00  ← NEW
+    All posts have full lineage in logs
+
+
+================================================================================
+DIAGRAM 6: Full Log Entry Examples
+──────────────────────────────────────────────────────────────────────────────
+
+  logs/scheduler.log:
+
+  [2026-06-08 14:30:00] chain_id=vasya_20260609_weekly_f3a2c1 post_id=uuid-001 action=schedule reason=queued | Привет! Это рассказ о выборе
+
+  [2026-06-08 14:30:15] chain_id=vasya_20260609_weekly_f3a2c1 post_id=uuid-002 action=schedule reason=queued | Вторник: рассказ о паттернах
+
+  [2026-06-08 14:31:10] chain_id=vasya_20260609_weekly_f3a2c1 post_id=uuid-003 action=error reason=no_media_url | Пост без фото
+
+  [2026-06-08 14:31:25] chain_id=vasya_20260609_weekly_f3a2c1 post_id=uuid-004 action=schedule reason=queued | Четверг: готовимся к выходным
+
+  [2026-06-08 14:31:40] chain_id=vasya_20260609_weekly_f3a2c1 post_id=uuid-005 action=schedule reason=queued | Пятница: СПЕЦПРЕДЛОЖЕНИЕ
+
+  [2026-06-08 15:00:00] chain_id=vasya_20260609_rescheduled_x9y2z1 post_id=uuid-001 action=reschedule reason=moved_1h_earlier | [Rescheduled] Привет! Это рассказ о выборе
+
+  Query by chain:
+  $ grep "chain_id=vasya_20260609_weekly_f3a2c1" logs/scheduler.log
+    → Shows all 5 original scheduling attempts
+    → Includes the error for uuid-003
+    → Clear decision history
+
+
+================================================================================
+DIAGRAM 7: State File Structure (JSON)
+──────────────────────────────────────────────────────────────────────────────
+
+  reports/schedules/vasya_20260609_weekly_f3a2c1.json
+
+  {
+    "posts": [
+      {
+        "id": "uuid-001",
+        "type": "photo",
+        "time": "2026-06-09T10:00:00Z",
+        "status": "queued"
+      },
+      {
+        "id": "uuid-002",
+        "type": "reel",
+        "time": "2026-06-10T10:00:00Z",
+        "status": "queued"
+      },
+      {
+        "id": "uuid-004",
+        "type": "photo",
+        "time": "2026-06-12T10:00:00Z",
+        "status": "queued"
+      },
+      {
+        "id": "uuid-005",
+        "type": "photo",
+        "time": "2026-06-13T10:00:00Z",
+        "status": "queued"
+      }
+    ],
+    "decisions": [
+      {
+        "timestamp": "2026-06-08T14:30:00",
+        "post_id": "uuid-001",
+        "action": "schedule",
+        "reason": "queued"
+      },
+      {
+        "timestamp": "2026-06-08T14:30:15",
+        "post_id": "uuid-002",
+        "action": "schedule",
+        "reason": "queued"
+      },
+      {
+        "timestamp": "2026-06-08T14:31:25",
+        "post_id": "uuid-004",
+        "action": "schedule",
+        "reason": "queued"
+      },
+      {
+        "timestamp": "2026-06-08T14:31:40",
+        "post_id": "uuid-005",
+        "action": "schedule",
+        "reason": "queued"
+      }
+    ],
+    "errors": [
+      {
+        "timestamp": "2026-06-08T14:31:10",
+        "post_id": "uuid-003",
+        "error": "Ошибка: нужна публичная ссылка на медиа (image_url должна начинаться на http)"
+      }
+    ]
+  }
+
+  Key observations:
+  • posts[] contains only successfully queued items
+  • decisions[] tracks every scheduling action
+  • errors[] logs failed attempts with full error text
+  • Each post has a unique UUID
+  • Times are ISO 8601 (parseable by any tool)
+
+
+================================================================================
+DIAGRAM 8: Integration with Pipeline
+──────────────────────────────────────────────────────────────────────────────
+
+  Vasya                          Pipeline                       Instagram
+  ─────                          ────────                       ──────────
+
+  schedule_post(
+    image_url, caption,
+    publish_time_utc,
+    chain_id="vasya_...",
+    post_type="photo"
+  )
+    │
+    └─→ pipeline.enqueue(
+          post_type, image_url, caption,
+          publish_time_utc,
+          status="approved",
+          source="vasya",
+          chain_id="vasya_..."  ← NEW PARAMETER
+        )
+          │
+          └─→ Store in queue with chain_id
+              (reports/publishing_queue.json)
+                │
+                └─→ [Every N minutes]
+                    publish_due() checks queue
+                      │
+                      └─→ If publish_time <= now:
+                            post_to_instagram(
+                              image_url, caption,
+                              chain_id="vasya_..."
+                            )
+                              │
+                              └─→ Log pipeline operation
+                                  with chain_id
+                                  │
+                                  └─→ Update queue status="published"
+                                      │
+                                      └─→ Instagram receives post ✓
+
+
+================================================================================
+DIAGRAM 9: Complete Workflow: Weekly Schedule
+──────────────────────────────────────────────────────────────────────────────
+
+  User              Vasya              Pipeline          Logs                 State
+  ────              ─────              ────────          ────                 ─────
+
+  /план
+    │
+    ├──→ Generate chain_id="vasya_weekly_f3a2c1"
+    │
+    ├──→ For Mon-Fri, schedule_post():
+    │    │
+    │    ├──→ Validate & enqueue
+    │         │
+    │         ├─────────→ pipeline queue
+    │         │
+    │         ├─────────────────────→ [timestamp] chain_id=vasya_... action=schedule
+    │         │
+    │         └─────────────────────────────────→ {posts: [...], decisions: [...]}
+    │
+    └─→ Show summary: "✓ 5 posts queued, chain_id=vasya_weekly_f3a2c1"
+
+  [Later, day-by-day, publish_due runs]
+
+  Mon 10:00    pipeline publishes post 1
+               │
+               ├─→ post_to_instagram()
+               │
+               └─────────────────────→ [timestamp] chain_id=vasya_... status=published
+
+  Tue 10:00    pipeline publishes post 2
+  Wed 10:00    pipeline publishes post 3
+  Thu 10:00    pipeline publishes post 4
+  Fri 10:00    pipeline publishes post 5
+
+  [Later, user can review]
+
+  /логи
+    │
+    └─→ get_scheduling_logs()
+         │
+         └────→ grep logs/scheduler.log for chain_id=vasya_weekly_f3a2c1
+               │
+               └─→ Show all 5 schedule + 5 publish events
+
+
+================================================================================
+DIAGRAM 10: Decision Reasons (Examples)
+──────────────────────────────────────────────────────────────────────────────
+
+  action=schedule:
+    reason=queued              ← Post added to queue
+    reason=approved_by_victoria ← Editor approved (future)
+
+  action=reschedule:
+    reason=moved_1h_earlier    ← User moved all posts
+    reason=conflict_detected   ← Time conflict with another post (future)
+
+  action=skip:
+    reason=content_not_ready   ← Waiting for Victoria's approval
+    reason=no_media            ← Media file not found
+    reason=time_conflict       ← Overlaps with another post
+
+  action=error:
+    reason=no_media_url        ← image_url is empty or invalid
+    reason=empty_caption       ← caption is empty
+    reason=pipeline_unavailable ← pipeline.py import failed
+    reason=enqueue_failed:TypeError ← pipeline.enqueue raised exception
+    reason=failed_to_save_state ← Cannot write state file
+
+  Each reason is logged for debugging:
+    [timestamp] chain_id=<id> post_id=<id> action=<action> reason=<reason> | <caption>
+
+
+================================================================================
+END OF DIAGRAMS
+================================================================================
+
+For detailed text explanations, see:
+  • VASYA_CHAIN_ID_GUIDE.md — User guide
+  • CHAIN_ID_IMPLEMENTATION.md — Integration details
+  • VASYA_USAGE_EXAMPLES.py — Runnable code

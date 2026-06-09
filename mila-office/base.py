@@ -22,6 +22,11 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.prompt import Prompt
 
+try:
+    import system_prompt_builder
+except ImportError:
+    system_prompt_builder = None
+
 # ─── CONFIG ──────────────────────────────────────────────
 MILA_FOLDER = Path(os.getenv("MILA_FOLDER", r"E:\MILA GOLD"))
 env_file = MILA_FOLDER / ".env"
@@ -525,11 +530,25 @@ def _phase_preamble(key: str) -> str:
         lines.append("Отстройка от рынка: " + pos["summary"])
     return "\n".join(l for l in lines if l)
 
-def compose_system(key: str, system: str) -> str:
-    """SYSTEM агента + контекст фазы офиса + активные улучшения от Стаса.
-    Так офис эволюционирует без правки кода агентов и полезен с первого дня
-    (фаза cold_start подмешивает экспертные defaults вместо пустоты)."""
+def compose_system(key: str, system: str, context: dict = None) -> str:
+    """SYSTEM агента + контекст фазы офиса + контекст запроса + активные улучшения от Стаса.
+
+    Args:
+        key: ключ агента (marina, victoria, итд)
+        system: базовый system prompt
+        context: контекст запроса {from_agent, to_agent, chain_id} или None
+    """
     out = system
+
+    # Добавляем контекст запроса если есть
+    if context and system_prompt_builder:
+        context_section = system_prompt_builder._build_context_section(
+            key, context,
+            system_prompt_builder.get_agent_chain_info(key)
+        )
+        if context_section:
+            out += "\n\n" + context_section
+
     preamble = _phase_preamble(key).strip()
     if preamble:
         out += "\n\n" + preamble
@@ -778,24 +797,42 @@ def _run_anthropic_agent(client, system: str, tools: list, tool_handler, message
 
 
 def run_agent(client, system: str, tools: list, tool_handler, user_message: str, history: list,
-              agent_key: str | None = None):
+              agent_key: str | None = None, context: dict = None):
+    """Запустить агента с поддержкой контекста запроса.
+
+    Args:
+        context: {from_agent, to_agent, chain_id} или None
+    """
+    # Извлекаем контекст из сообщения если есть теги
+    if not context and system_prompt_builder:
+        context = system_prompt_builder.extract_context_from_message(user_message)
+
+    # Обновляем system prompt с контекстом
+    enhanced_system = compose_system(agent_key or "default", system, context)
+
+    # Логируем если контекст есть
+    if context:
+        from_agent = context.get("from_agent", "user")
+        chain_id = context.get("chain_id", "")
+        log("chain", f"agent={agent_key} from={from_agent} chain={chain_id}")
+
     history.append({"role": "user", "content": user_message})
     messages = history.copy()
     provider = provider_for_agent(agent_key)
     if provider == "gemini":
-        return _run_gemini_agent(system, tools, tool_handler, messages, history)
+        return _run_gemini_agent(enhanced_system, tools, tool_handler, messages, history)
     # Claude-агенты (Стас, Кирилл): если Claude недоступен (нет кредитов, 429,
     # сеть) — НЕ падаем, а откатываемся на Gemini. Tool-loop пишет в локальный
     # messages, не в history, поэтому при сбое history чистая (только user-msg) —
     # можно безопасно перезапустить на Gemini со свежей копией.
     try:
-        return _run_anthropic_agent(client, system, tools, tool_handler, messages, history)
+        return _run_anthropic_agent(client, enhanced_system, tools, tool_handler, messages, history)
     except Exception as e:
         if not GEMINI_KEY:
             raise  # фолбэка нет — пробрасываем исходную ошибку Claude
         console.print(f"[yellow]Claude недоступен ({str(e)[:80]}) → фолбэк на Gemini[/yellow]")
         log("llm", f"fallback claude->gemini agent={agent_key}: {str(e)[:120]}")
-        return _run_gemini_agent(system, tools, tool_handler, history.copy(), history)
+        return _run_gemini_agent(enhanced_system, tools, tool_handler, history.copy(), history)
 
 def chat_loop(name: str, emoji: str, color: str, system: str, tools: list, tool_handler, quick_cmds: dict):
     client = get_client()

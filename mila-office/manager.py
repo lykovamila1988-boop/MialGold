@@ -6,8 +6,23 @@
 
 Задачи пишутся в локальный JSON (reports/office_actions.json). Позже сюда же
 можно подключить Supabase — достаточно заменить _read_actions/_write_actions.
+
+УПРАВЛЕНИЕ ЦЕПОЧКАМИ АГЕНТОВ (Orchestration Context):
+─────────────────────────────────────────────────────
+Стас координирует параллельные и последовательные цепи через:
+  • list_chains() — инвентарь (новые, работающие, ошибочные, завершённые)
+  • run_chain(name, context) — запустить цепь через pipeline.py (subprocess)
+  • get_chain_status(id) — состояние цепочки по чекпоинту (шаг, прогресс, ошибки)
+  • manage_parallel(chains, mode, timeout) — управлять несколькими цепами одновременно
+  • resolve_chain_conflict(id1, id2) — при конфликте (два агента пишут в один файл)
+
+Примеры:
+  python manager.py --run-chain content_week
+  python manager.py --monitor-chains --parallel 3
+  python manager.py --resolve-conflicts
 """
 import re
+import subprocess
 from datetime import datetime, timedelta
 from base import *
 
@@ -106,6 +121,348 @@ ACTIONS_PATH = MILA_FOLDER / "reports" / "office_actions.json"
 LOGS_DIR = MILA_FOLDER / "logs"
 REPORTS_DIR = MILA_FOLDER / "reports"
 _LOG_TS = re.compile(r"^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2})\]\s*(.*)$")
+
+# ─── ORCHESTRATION: Цепочки и параллельное управление ──────
+CHAINS_DIR = MILA_FOLDER / "reports" / "chains"
+CHAIN_STATE_DIR = MILA_FOLDER / "reports" / "chain_states"
+RUNNING_CHAINS_FILE = CHAIN_STATE_DIR / "running.json"
+
+# Регистр цепочек: какие цепи есть и их шаг (из pipeline.py + расширения)
+_BUILTIN_CHAINS = {
+    "new_client": {
+        "steps": ["alina", "lera"],
+        "description": "Новая клиентка: интейк (Алина) → персональный follow-up (Лера)",
+        "requires_context": True,
+    },
+    "content_week": {
+        "steps": ["olya", "marina", "victoria", "vasya"],
+        "description": "Еженедельный контент: тренды → идеи → редактура → расписание",
+        "requires_context": False,
+    },
+    "monday_brief": {
+        "steps": ["manager", "marina"],
+        "description": "Понедельник: недельный отчёт (Стас) → план контента (Марина)",
+        "requires_context": False,
+    },
+    "weekly_report": {
+        "steps": ["dima", "marina", "manager"],
+        "description": "Еженедельный финансовый отчёт и аналитика",
+        "requires_context": False,
+    },
+    "error_investigation": {
+        "steps": ["manager", "producer"],
+        "description": "Срочное расследование ошибки в приложении",
+        "requires_context": True,  # context содержит ошибку/логи
+    },
+}
+
+
+# ─── ИНСТРУМЕНТЫ УПРАВЛЕНИЯ ЦЕПОЧКАМИ ─────────────────────
+
+def _ensure_chain_dirs():
+    """Инициализирует директории для управления цепочками."""
+    CHAINS_DIR.mkdir(parents=True, exist_ok=True)
+    CHAIN_STATE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _read_running_chains():
+    """Читает список активных цепочек и их состояние."""
+    try:
+        return json.loads(RUNNING_CHAINS_FILE.read_text(encoding="utf-8"))
+    except (FileNotFoundError, ValueError):
+        return {"active": [], "completed": [], "failed": []}
+
+
+def _write_running_chains(data):
+    """Сохраняет состояние активных цепочек."""
+    _ensure_chain_dirs()
+    RUNNING_CHAINS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def list_chains(status="all"):
+    """Инвентарь цепочек: встроенные, пользовательские, с их статусом."""
+    running = _read_running_chains()
+    chains_info = []
+
+    for name, config in _BUILTIN_CHAINS.items():
+        active_instance = next((c for c in running["active"] if c["name"] == name), None)
+        completed = sum(1 for c in running["completed"] if c["name"] == name)
+        failed = sum(1 for c in running["failed"] if c["name"] == name)
+
+        chains_info.append({
+            "name": name,
+            "type": "builtin",
+            "description": config["description"],
+            "steps": len(config["steps"]),
+            "step_names": config["steps"],
+            "status": "running" if active_instance else ("completed" if completed else "idle"),
+            "active_id": active_instance.get("id") if active_instance else None,
+            "runs": {"completed": completed, "failed": failed},
+        })
+
+    # Пользовательские цепи (из контекста, заданные через /управление)
+    custom_chains = []
+    chains_meta_file = CHAIN_STATE_DIR / "custom_chains.json"
+    if chains_meta_file.exists():
+        try:
+            custom = json.loads(chains_meta_file.read_text(encoding="utf-8"))
+            custom_chains = custom.get("chains", [])
+        except (ValueError, OSError):
+            pass
+
+    for cc in custom_chains:
+        chains_info.append({
+            "name": cc.get("name", "unknown"),
+            "type": "custom",
+            "description": cc.get("description", "—"),
+            "steps": len(cc.get("steps", [])),
+            "step_names": cc.get("steps", []),
+            "status": "idle",
+        })
+
+    # Фильтруем по статусу
+    if status != "all":
+        chains_info = [c for c in chains_info if c["status"] == status or status == "all"]
+
+    return json.dumps({"total": len(chains_info), "chains": chains_info},
+                     ensure_ascii=False, indent=2)
+
+
+def run_chain(chain_name, context_json="", wait=False, timeout_seconds=300):
+    """Запускает цепочку агентов через pipeline.py (subprocess).
+
+    context_json — JSON-объект с данными для цепочки (опционально).
+    wait — ждать завершения (True) или вернуть id и выход (False).
+    timeout_seconds — максимум времени выполнения (если wait=True).
+
+    Возвращает: {id, chain_name, status, result_file, error} или ошибку.
+    """
+    if chain_name not in _BUILTIN_CHAINS:
+        return f"Неизвестная цепочка: {chain_name}. Доступны: {', '.join(_BUILTIN_CHAINS.keys())}"
+
+    chain_id = f"{chain_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    running = _read_running_chains()
+
+    # Регистрируем в активных
+    chain_record = {
+        "id": chain_id,
+        "name": chain_name,
+        "started": datetime.now().isoformat(),
+        "status": "starting",
+        "context": context_json[:500] if context_json else "",  # не весь контекст
+    }
+    running["active"].append(chain_record)
+    _write_running_chains(running)
+
+    # Запускаем в subprocess
+    try:
+        cmd = [sys.executable, "pipeline.py", chain_name]
+        if context_json:
+            # Передаём контекст через временный файл (безопаснее чем argv)
+            ctx_file = CHAIN_STATE_DIR / f"{chain_id}_context.json"
+            ctx_file.write_text(context_json, encoding="utf-8")
+            cmd.extend(["--context-file", str(ctx_file)])
+
+        if wait:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_seconds,
+                                   cwd=str(MILA_FOLDER / "mila-office"))
+            if result.returncode == 0:
+                running = _read_running_chains()
+                running["active"] = [c for c in running["active"] if c["id"] != chain_id]
+                running["completed"].append({**chain_record, "completed": datetime.now().isoformat()})
+                _write_running_chains(running)
+
+                return json.dumps({
+                    "id": chain_id,
+                    "chain_name": chain_name,
+                    "status": "completed",
+                    "result": result.stdout[:1000],  # первые 1000 символов
+                    "errors": result.stderr[:500] if result.stderr else None,
+                }, ensure_ascii=False, indent=2)
+            else:
+                running = _read_running_chains()
+                running["active"] = [c for c in running["active"] if c["id"] != chain_id]
+                running["failed"].append({**chain_record, "failed": datetime.now().isoformat(),
+                                         "error": result.stderr[:200]})
+                _write_running_chains(running)
+
+                return json.dumps({
+                    "id": chain_id,
+                    "chain_name": chain_name,
+                    "status": "failed",
+                    "errors": result.stderr[:500],
+                }, ensure_ascii=False, indent=2)
+        else:
+            # Фоновый запуск
+            subprocess.Popen(cmd, cwd=str(MILA_FOLDER / "mila-office"),
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return json.dumps({
+                "id": chain_id,
+                "chain_name": chain_name,
+                "status": "started",
+                "note": "Запущена в фоне. Статус: get_chain_status(id).",
+            }, ensure_ascii=False, indent=2)
+
+    except subprocess.TimeoutExpired:
+        running = _read_running_chains()
+        running["active"] = [c for c in running["active"] if c["id"] != chain_id]
+        running["failed"].append({**chain_record, "failed": datetime.now().isoformat(),
+                                 "error": f"Timeout: {timeout_seconds}s"})
+        _write_running_chains(running)
+        return json.dumps({
+            "id": chain_id,
+            "status": "timeout",
+            "error": f"Цепочка превысила {timeout_seconds}s",
+        }, ensure_ascii=False, indent=2)
+    except Exception as e:
+        return json.dumps({
+            "id": chain_id,
+            "status": "error",
+            "error": str(e),
+        }, ensure_ascii=False, indent=2)
+
+
+def get_chain_status(chain_id):
+    """Получает статус запущенной цепочки по её ID."""
+    running = _read_running_chains()
+
+    # Ищем в активных
+    for c in running["active"]:
+        if c["id"] == chain_id:
+            state_file = CHAIN_STATE_DIR / f"{chain_id}_state.json"
+            checkpoint = {}
+            if state_file.exists():
+                try:
+                    checkpoint = json.loads(state_file.read_text(encoding="utf-8"))
+                except (ValueError, OSError):
+                    pass
+
+            return json.dumps({
+                "id": chain_id,
+                "status": "running",
+                "started": c.get("started"),
+                "chain_name": c.get("name"),
+                "checkpoint": checkpoint,  # текущий шаг и прогресс
+            }, ensure_ascii=False, indent=2)
+
+    # Ищем в завершённых
+    for c in running["completed"]:
+        if c["id"] == chain_id:
+            return json.dumps({
+                "id": chain_id,
+                "status": "completed",
+                "chain_name": c.get("name"),
+                "completed": c.get("completed"),
+            }, ensure_ascii=False, indent=2)
+
+    # Ищем в ошибочных
+    for c in running["failed"]:
+        if c["id"] == chain_id:
+            return json.dumps({
+                "id": chain_id,
+                "status": "failed",
+                "chain_name": c.get("name"),
+                "failed": c.get("failed"),
+                "error": c.get("error"),
+            }, ensure_ascii=False, indent=2)
+
+    return json.dumps({"error": f"Цепочка {chain_id} не найдена"}, ensure_ascii=False)
+
+
+def manage_parallel(chain_names="", mode="sequential", max_parallel=2):
+    """Запускает и управляет несколькими цепочками одновременно.
+
+    chain_names — через запятую: 'new_client,content_week,weekly_report'
+    mode — 'sequential' (одна за другой) или 'parallel' (одновременно, макс max_parallel)
+
+    Возвращает сводку по каждой цепочке.
+    """
+    names = [n.strip() for n in (chain_names or "").split(",") if n.strip()]
+    if not names:
+        return "Нужны имена цепочек через запятую: chain_names='new_client,content_week'"
+
+    results = []
+
+    if mode == "sequential":
+        for name in names:
+            res = json.loads(run_chain(name, wait=True, timeout_seconds=600))
+            results.append(res)
+            log("manager", f"Sequential: завершена цепь {name}")
+
+    elif mode == "parallel":
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_parallel) as executor:
+            futures = {executor.submit(run_chain, name, "", True, 600): name for name in names}
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    res = json.loads(future.result())
+                    results.append(res)
+                except Exception as e:
+                    results.append({"error": str(e), "chain": futures[future]})
+
+    summary = {
+        "mode": mode,
+        "total": len(names),
+        "completed": sum(1 for r in results if r.get("status") == "completed"),
+        "failed": sum(1 for r in results if r.get("status") == "failed"),
+        "chains": results,
+    }
+    return json.dumps(summary, ensure_ascii=False, indent=2)
+
+
+def resolve_chain_conflict(conflict_type="write", agent1="", agent2="", resource=""):
+    """Решает конфликты между параллельными цепочками.
+
+    Типы:
+    • write — два агента пишут в один файл (락+ очередь)
+    • read — агент читает данные, которые другой изменяет в реальном времени
+    • resource — доступ к ограниченному ресурсу (API, токен, etc)
+
+    Возвращает рекомендацию и блокирует/очередирует конфликтующих агентов.
+    """
+    conflict_log = CHAIN_STATE_DIR / "conflicts.json"
+    conflicts = []
+    if conflict_log.exists():
+        try:
+            conflicts = json.loads(conflict_log.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            pass
+
+    conflict_record = {
+        "timestamp": datetime.now().isoformat(),
+        "type": conflict_type,
+        "agent1": agent1,
+        "agent2": agent2,
+        "resource": resource,
+        "resolution": "pending",
+    }
+
+    if conflict_type == "write":
+        # Решение: первый agent получает lock, второй встаёт в очередь
+        conflict_record["resolution"] = f"Lock для {agent1}, очередь: {agent2}"
+        conflict_record["recommendation"] = (
+            f"Запустить {agent1} первым (wait=True), затем {agent2}. "
+            f"Или использовать atomic writes через lock-файл в CHAIN_STATE_DIR."
+        )
+
+    elif conflict_type == "read":
+        conflict_record["resolution"] = f"Snapshot данных для {agent1} перед изменением {agent2}"
+        conflict_record["recommendation"] = (
+            f"Сохранить снимок данных {resource} перед запуском {agent2}. "
+            f"{agent1} читает снимок, а не актуальные данные (итерация без гонки)."
+        )
+
+    elif conflict_type == "resource":
+        conflict_record["resolution"] = f"Использовать rate-limit или очередь в n8n/pipeline"
+        conflict_record["recommendation"] = (
+            f"Добавить sleep/delay между вызовами {agent1} и {agent2} для ресурса {resource}. "
+            f"Или завести глобальный семафор в memory.py (rate_limiter)."
+        )
+
+    conflicts.append(conflict_record)
+    conflict_log.write_text(json.dumps(conflicts[-20:], ensure_ascii=False, indent=2), encoding="utf-8")
+
+    return json.dumps(conflict_record, ensure_ascii=False, indent=2)
 
 
 def _parse_since(s):
@@ -676,6 +1033,42 @@ TOOLS = core_tools("Прочитать лог/отчёт/файл рабочей
                    "Сохранить отчёт-ревью или заметку",
                    "Показать файлы (логи/отчёты)",
                    list_default="reports") + [
+    # ─── ORCHESTRATION: Управление цепочками ──────────────────
+    {"name": "list_chains",
+     "description": "Инвентарь цепочек: встроенные + пользовательские, их шаги и статус. status='all'/'running'/'idle'.",
+     "input_schema": {"type": "object", "properties": {
+         "status": {"type": "string", "default": "all", "enum": ["all", "running", "idle"]}}}},
+    {"name": "run_chain",
+     "description": "Запустить цепочку агентов. wait=True → ждёт завершения (макс 5 мин); "
+                    "wait=False → запускает в фоне и возвращает id для мониторинга.",
+     "input_schema": {"type": "object", "properties": {
+         "chain_name": {"type": "string", "description": "Имя цепи: new_client/content_week/monday_brief/weekly_report/error_investigation"},
+         "context_json": {"type": "string", "description": "JSON-объект с данными для цепи (опционально)"},
+         "wait": {"type": "boolean", "default": False},
+         "timeout_seconds": {"type": "integer", "default": 300}},
+         "required": ["chain_name"]}},
+    {"name": "get_chain_status",
+     "description": "Получить статус (running/completed/failed) запущенной цепочки по её ID.",
+     "input_schema": {"type": "object", "properties": {
+         "chain_id": {"type": "string"}}, "required": ["chain_id"]}},
+    {"name": "manage_parallel",
+     "description": "Запустить и управлять несколькими цепочками. mode='sequential' (одна за другой) или 'parallel' (одновременно). "
+                    "max_parallel — макс одновременных (по умолчанию 2).",
+     "input_schema": {"type": "object", "properties": {
+         "chain_names": {"type": "string", "description": "Через запятую: new_client,content_week,weekly_report"},
+         "mode": {"type": "string", "default": "sequential", "enum": ["sequential", "parallel"]},
+         "max_parallel": {"type": "integer", "default": 2}},
+         "required": ["chain_names"]}},
+    {"name": "resolve_chain_conflict",
+     "description": "Решить конфликт между параллельными цепочками (write/read/resource). "
+                    "Возвращает рекомендацию по lock/queue/rate-limit.",
+     "input_schema": {"type": "object", "properties": {
+         "conflict_type": {"type": "string", "enum": ["write", "read", "resource"], "default": "write"},
+         "agent1": {"type": "string", "description": "Первый агент"},
+         "agent2": {"type": "string", "description": "Второй агент"},
+         "resource": {"type": "string", "description": "Конфликтующий ресурс (файл, API, etc)"}},
+         "required": ["conflict_type"]}},
+    # ─── Остальные инструменты анализа ────────────────────────
     {"name": "office_review",
      "description": "Ревью логов и свежих отчётов за период. agent='all' или имя агента; since='24h','7d','week'.",
      "input_schema": {"type": "object", "properties": {
@@ -753,6 +1146,23 @@ TOOLS = core_tools("Прочитать лог/отчёт/файл рабочей
 
 
 def handle(name, inp):
+    # ─── ORCHESTRATION: Управление цепочками ──────────────────
+    if name == "list_chains":
+        return list_chains(inp.get("status", "all"))
+    if name == "run_chain":
+        return run_chain(inp.get("chain_name", ""), inp.get("context_json", ""),
+                        inp.get("wait", False), inp.get("timeout_seconds", 300))
+    if name == "get_chain_status":
+        return get_chain_status(inp.get("chain_id", ""))
+    if name == "manage_parallel":
+        return manage_parallel(inp.get("chain_names", ""), inp.get("mode", "sequential"),
+                              inp.get("max_parallel", 2))
+    if name == "resolve_chain_conflict":
+        return resolve_chain_conflict(inp.get("conflict_type", "write"),
+                                      inp.get("agent1", ""), inp.get("agent2", ""),
+                                      inp.get("resource", ""))
+
+    # ─── Основные инструменты анализа ──────────────────
     if name == "office_review":
         return office_review(inp.get("agent", "all"), inp.get("since", "24h"))
     if name == "measure_metrics":
@@ -794,6 +1204,14 @@ def handle(name, inp):
 
 
 QUICK = {
+    # ─── ORCHESTRATION: Управление цепочками ──────────────────
+    "/цепи":        "Покажи инвентарь цепочек: встроенные (new_client/content_week/monday_brief/weekly_report) и статус каждой через list_chains",
+    "/запусти-цепь": "Запусти цепочку по имени: /запусти-цепь content_week (фоном) или /запусти-цепь new_client --wait (ждёт результата)",
+    "/монитор":     "Мониторь текущие запущенные цепочки: какие работают, какие завершили, какие упали",
+    "/параллель":   "Запусти несколько цепочек одновременно (например, new_client И content_week параллельно) с управлением нагрузкой",
+    "/конфликты":   "Анализируй и предлагай решения для конфликтов между цепочками (write-блокировки, read-race, API-лимиты)",
+
+    # ─── Основной анализ ──────────────────
     "/отчёт":      "Полный цикл самоулучшения: собери данные (measure_metrics + последние отчёты reports/), найди узкие места воронки и дай список улучшений с приоритетами и данными",
     "/узкое":      "Найди ОДНО главное узкое место, где офис теряет деньги/лиды прямо сейчас — с конкретными цифрами и тем, какого отчёта не хватает, если данных нет",
     "/улучши":     "Прочитай промпты агентов (read_agent_prompt), найди слабое место по данным и предложи конкретный апгрейд; примени топ-1 через improve_agent с обоснованием и данными",

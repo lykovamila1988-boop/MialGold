@@ -40,11 +40,20 @@ def register_routes(app):
 
     @app.post("/api/chat")
     def chat():
-        """Отправить сообщение агенту (создать задание)."""
+        """Отправить сообщение агенту (создать задание).
+
+        Может содержать контекст:
+        - from_agent: от какого агента (если из цепочки)
+        - to_agent: кому адресовано (если переделегировано)
+        - chain_id: ID цепочки обработки
+        """
         try:
             data = request.get_json(force=True) or {}
             agent_key = data.get("agent", "").strip()
             msg_text = data.get("message", "").strip()
+            from_agent = data.get("from_agent", "").strip() or "user"  # Дефолт: от пользователя
+            to_agent = data.get("to_agent", "").strip() or None
+            chain_id = data.get("chain_id", "").strip() or None
 
             if not security.validate_agent_key(agent_key):
                 abort(400)
@@ -55,11 +64,22 @@ def register_routes(app):
             import secrets
             job_id = secrets.token_hex(8)
 
-            # Создаём задание
-            job_queue.create_job(job_id, "session_id", agent_key)
+            # Создаём задание с контекстом
+            job = job_queue.create_job(job_id, "session_id", agent_key)
 
-            logger.info(f"Created job {job_id} for agent {agent_key}")
-            return jsonify({"job": job_id, "ok": True})
+            # Сохраняем контекст запроса
+            job["from_agent"] = from_agent  # От кого пришел
+            job["to_agent"] = to_agent or None  # Кому возвращать
+            job["chain_id"] = chain_id  # ID цепочки
+
+            logger.info(f"Created job {job_id} for agent {agent_key} from {from_agent}")
+            return jsonify({
+                "job": job_id,
+                "ok": True,
+                "agent": agent_key,
+                "from_agent": from_agent,
+                "chain_id": chain_id,
+            })
 
         except Exception as e:
             logger.error(f"Error in /api/chat: {e}", exc_info=True)
@@ -67,7 +87,16 @@ def register_routes(app):
 
     @app.get("/api/result")
     def result():
-        """Получить результат задания."""
+        """Получить результат задания с контекстом цепочки.
+
+        Возвращает:
+        - reply: ответ агента
+        - verdict: статус (ready_next, done, etc)
+        - next_agent: кому передать (если нужно)
+        - from_agent: от кого был запрос
+        - to_agent: кому адресовано (для деделегирования)
+        - chain_id: ID цепочки
+        """
         try:
             job_id = request.args.get("job", "").strip()
 
@@ -83,9 +112,13 @@ def register_routes(app):
 
             # Обработка ответа через message_handler
             if job.get("reply") and job.get("agent_key"):
+                from_agent = job.get("from_agent", "user")
+                chain_id = job.get("chain_id")
                 response = message_handler.process_agent_response(
                     job["reply"],
-                    job["agent_key"]
+                    job["agent_key"],
+                    from_agent=from_agent,
+                    chain_id=chain_id
                 )
                 job["verdict"] = response["verdict"]
                 if response["should_switch"] and response["next_agent"]:
@@ -93,7 +126,24 @@ def register_routes(app):
 
             # Результат забран — удаляем из памяти
             result_data = {k: v for k, v in job.items() if k != "status"}
+
+            # Добавляем контекст цепочки для следующего агента
+            if job.get("next_agent"):
+                result_data["chain_context"] = {
+                    "current_agent": job.get("agent_key"),
+                    "from_agent": job.get("from_agent", "user"),
+                    "original_to_agent": job.get("to_agent"),
+                    "chain_id": job.get("chain_id"),
+                }
+
             job_queue.remove_job(job_id)
+
+            logger.info(
+                f"Result for job {job_id}: "
+                f"agent={job.get('agent_key')}, "
+                f"verdict={result_data.get('verdict')}, "
+                f"next={result_data.get('next_agent')}"
+            )
 
             return jsonify(result_data)
 

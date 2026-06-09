@@ -1,0 +1,399 @@
+================================================================================
+TYOMA API REFERENCE: Complete Method Signatures & Usage
+================================================================================
+
+This file documents all functions in tyoma.py that agents, scripts, or
+external workflows might call.
+
+================================================================================
+PRIMARY FUNCTION: send_to_queue()
+================================================================================
+
+SIGNATURE:
+  send_to_queue(
+      text: str,
+      channel_id: str = "",
+      chat_id: str = "",
+      chain_id: str = "",
+      content_type: str = ""
+  ) -> dict
+
+PARAMETERS:
+  text (str, REQUIRED)
+    - Message content for Telegram
+    - Max length: no hard limit, but 4096 chars is Telegram API limit per message
+    - Unicode (Russian, emoji) supported
+    - HTML tags supported if parse_mode set in shared_tools.telegram_send()
+
+  channel_id (str, OPTIONAL)
+    - Telegram channel ID (negative, e.g., "-1001234567890")
+    - Used when broadcasting to channel (everyone sees)
+    - If empty, falls back to chat_id
+    - Required if not using chat_id
+
+  chat_id (str, OPTIONAL)
+    - Telegram user/chat ID (positive, e.g., "987654321")
+    - Used for private messages (DM)
+    - If empty, falls back to channel_id
+    - Required if not using channel_id
+
+  chain_id (str, OPTIONAL)
+    - Links this Telegram message to Instagram version
+    - Format: "ig_20260608_a1b2c3" (Instagram source) or leave empty
+    - If empty, auto-generates "tg_XXXXXXXX" (Telegram-only)
+    - Must match Instagram chain_id for cross-posting
+    - Used in: get_cross_post_context(), analytics
+
+  content_type (str, OPTIONAL)
+    - Category for analytics & decision-making
+    - Valid values:
+      * "insight" — psychology insight, pattern explanation
+      * "case" — client success story, real-world example
+      * "practice" — exercise, meditation, homework
+      * "offer" — limited-time offer, CTA, diagnostic
+      * "diagnostic" — questionnaire, assessment
+      * "welcome" — onboarding message for new subscribers
+      * "general" — anything else (default)
+    - Used in: message filtering, A/B testing, reporting
+
+RETURNS: dict
+  {
+    "status": "queued" | "draft" | "error",
+    "message": "✓ В очередь" | error description,
+    "id": "msg_1717862400000",               # Message ID in queue
+    "chain_id": "ig_20260608_a1b2c3"         # Either input or generated
+  }
+
+EXAMPLES:
+
+1. Cross-post Instagram insight to Telegram channel:
+   ──────────────────────────────────────────────
+   send_to_queue(
+       text="🚨 Паттерн Спасателя...\n\n📌 Практикум: [ссылка]\n🎯 Консультация: [ссылка]",
+       channel_id="-1001234567890",
+       chain_id="ig_20260608_a1b2c3",
+       content_type="insight"
+   )
+   Result:
+   {
+     "status": "queued",
+     "message": "✓ В очередь",
+     "id": "msg_1717862400000",
+     "chain_id": "ig_20260608_a1b2c3"
+   }
+
+2. Send private message (DM) with new lead response:
+   ──────────────────────────────────────────────────
+   send_to_queue(
+       text="Привет! Спасибо за ХОЧУ. Я отправила тебе ссылку на консультацию.",
+       chat_id="987654321",
+       content_type="general"
+   )
+   Result: chain_id auto-generated as "tg_a1b2c3d4"
+
+3. Telegram-only content (no Instagram version):
+   ────────────────────────────────────────────────
+   send_to_queue(
+       text="Welcome to the channel! подпишись для инсайтов...",
+       channel_id="-1001234567890",
+       content_type="welcome"
+   )
+   Result: chain_id auto-generated as "tg_w3l2m1n0"
+
+================================================================================
+TOOL: get_cross_post_context()
+================================================================================
+
+SIGNATURE:
+  get_cross_post_context(chain_id: str) -> dict
+
+PURPOSE:
+  Retrieve Instagram post from queue by chain_id, so Tyoma can adapt it
+  for Telegram. Used when implementing /кросс command or auto-sync.
+
+PARAMETERS:
+  chain_id (str, REQUIRED)
+    - Chain ID from Instagram post (e.g., "ig_20260608_a1b2c3")
+    - Must start with "ig_" to be found in Instagram queue
+
+RETURNS: dict
+
+  CASE 1: Found in queue (pending Instagram post):
+  ─────────────────────────────────────────────────
+  {
+    "ok": true,
+    "found": true,
+    "chain_id": "ig_20260608_a1b2c3",
+    "original_text": "Когда мы пытаемся спасти...",  # First 500 chars
+    "original_type": "insight",
+    "source": "instagram",
+    "note": "Адаптируй этот контент для Telegram: добавь ссылки на практикум..."
+  }
+
+  CASE 2: Not found (already published or doesn't exist):
+  ────────────────────────────────────────────────────────
+  {
+    "ok": true,
+    "found": false,
+    "chain_id": "ig_20260608_a1b2c3",
+    "note": "Пост может быть уже опубликован в Instagram. Скажи что публиковать в Telegram."
+  }
+
+  CASE 3: Error:
+  ───────────────
+  {
+    "ok": false,
+    "error": "chain_id is required" | "other error message"
+  }
+
+USAGE EXAMPLE:
+
+  # In Tyoma agent:
+  context = get_cross_post_context("ig_20260608_a1b2c3")
+  if context["found"]:
+      original = context["original_text"]
+      # Adapt for Telegram...
+      send_to_queue(
+          telegram_version,
+          channel_id=CHANNEL_ID,
+          chain_id="ig_20260608_a1b2c3",  # Keep same chain_id
+          content_type=context["original_type"]
+      )
+
+================================================================================
+TOOL: list_pending_telegram()
+================================================================================
+
+SIGNATURE:
+  list_pending_telegram(limit: int = 10) -> dict
+
+PURPOSE:
+  Show queue of Telegram messages waiting to be sent. For monitoring,
+  debugging, and user visibility.
+
+PARAMETERS:
+  limit (int, OPTIONAL, default=10)
+    - How many messages to return
+    - Max reasonable: 50-100 (file I/O)
+
+RETURNS: dict
+
+  CASE 1: Messages in queue:
+  ──────────────────────────
+  {
+    "status": "ok",
+    "count": 3,
+    "limit": 10,
+    "items": [
+      {
+        "id": "msg_1717862400000",
+        "text": "Когда мы пытаемся спасти...",  # First 100 chars
+        "status": "pending",
+        "type": "insight",
+        "chain_id": "ig_20260608_a1b2c3",
+        "created_at": "2026-06-08T10:00:00Z"
+      },
+      {
+        "id": "msg_1717862401000",
+        "text": "Добро пожаловать в канал!",
+        "status": "pending",
+        "type": "welcome",
+        "chain_id": "tg_w3l2m1n0",
+        "created_at": "2026-06-08T10:05:00Z"
+      },
+      {
+        "id": "msg_1717862402000",
+        "text": "Спасибо за вопрос! Вот ответ...",
+        "status": "pending",
+        "type": "general",
+        "chain_id": "tg_r4s5p6n7",
+        "created_at": "2026-06-08T10:10:00Z"
+      }
+    ]
+  }
+
+  CASE 2: Queue empty:
+  ────────────────────
+  {
+    "status": "empty",
+    "message": "Очередь пуста — всё отправлено!"
+  }
+
+  CASE 3: Error:
+  ───────────────
+  {
+    "ok": false,
+    "error": "error message"
+  }
+
+USAGE EXAMPLE:
+
+  # User asks to see queue
+  status = list_pending_telegram(limit=20)
+  if status["status"] == "ok":
+      print(f"Ожидают отправки {status['count']} сообщений:")
+      for msg in status["items"]:
+          print(f"  {msg['type']}: {msg['text'][:50]}... ({msg['chain_id']})")
+
+================================================================================
+EXPOSED TOOL SCHEMAS (in TOOLS list)
+================================================================================
+
+For use in tool-calling systems (Claude API, n8n, etc.):
+
+TOOL 1: send_to_queue
+  Name: "send_to_queue"
+  Description: "Поставить сообщение в очередь для отправки в Telegram..."
+  Input schema:
+    {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string",
+          "description": "Текст сообщения для Telegram"
+        },
+        "channel_id": {
+          "type": "string",
+          "description": "ID канала (опционально, если публикация в канал)"
+        },
+        "chat_id": {
+          "type": "string",
+          "description": "ID чата/пользователя (опционально, если DM)"
+        },
+        "chain_id": {
+          "type": "string",
+          "description": "ID цепочки постов из Instagram (для кросс-постинга)..."
+        },
+        "content_type": {
+          "type": "string",
+          "description": "Тип контента: инсайт, кейс, практика, оффер, диагностика, welcome"
+        }
+      },
+      "required": ["text"]
+    }
+
+TOOL 2: get_cross_post_context
+  Name: "get_cross_post_context"
+  Description: "Получить контекст поста из Instagram для адаптации под Telegram..."
+  Input schema:
+    {
+      "type": "object",
+      "properties": {
+        "chain_id": {
+          "type": "string",
+          "description": "ID цепочки постов из Instagram"
+        }
+      },
+      "required": ["chain_id"]
+    }
+
+TOOL 3: list_pending_telegram
+  Name: "list_pending_telegram"
+  Description: "Показать очередь ожидающих Telegram сообщений"
+  Input schema:
+    {
+      "type": "object",
+      "properties": {
+        "limit": {
+          "type": "integer",
+          "description": "Сколько показать (по умолчанию 10)"
+        }
+      }
+    }
+
+================================================================================
+INTEGRATION WITH memory.py
+================================================================================
+
+These functions are called internally by Tyoma:
+
+memory.queue_message(channel, text, confirm=False, metadata=None)
+  ↑ Called by: send_to_queue()
+  Used for: putting message in unified queue
+
+memory.get_pending_messages(channel=None, limit=10)
+  ↑ Called by: get_cross_post_context(), list_pending_telegram()
+  Used for: reading messages from queue
+
+memory.record_published(media_id, theme, hook="", extra=None)
+  ↑ Called by: Vasya (NOT Tyoma directly)
+  Used for: recording Instagram posts with chain_id in extra
+
+See: e:\MILA GOLD\mila-office\memory.py for implementation
+
+================================================================================
+CONSTANTS & DEFAULTS
+================================================================================
+
+Message queue file:
+  memory.MESSAGE_QUEUE = mila-office/memory/message_queue.jsonl
+
+Max queue entries to scan:
+  limit=100 in get_cross_post_context() (performance safety)
+
+Chain ID generation:
+  Format: "tg_" + first 8 chars of uuid.uuid4()
+  Example: "tg_a1b2c3d4"
+
+Content types (suggested):
+  insight, case, practice, offer, diagnostic, welcome, general
+
+================================================================================
+ERROR HANDLING
+================================================================================
+
+All functions return {"ok": True/False, ...} or {"status": "ok"/"error", ...}
+
+Common errors:
+
+1. chain_id is required
+   Cause: Called get_cross_post_context() with empty chain_id
+   Fix: Provide non-empty chain_id
+
+2. queue is empty
+   Cause: Called list_pending_telegram() but no messages
+   Fix: Create messages with send_to_queue() first
+
+3. file I/O error
+   Cause: mila-office/memory/ directory not accessible
+   Fix: Check file permissions, ensure directory exists
+
+4. invalid metadata
+   Cause: metadata parameter malformed
+   Fix: Pass dict with valid keys (chain_id, source, content_type, etc.)
+
+================================================================================
+TESTING CHECKLIST
+================================================================================
+
+□ Test send_to_queue with all parameters
+□ Test send_to_queue with minimal parameters (only text)
+□ Test chain_id auto-generation
+□ Test get_cross_post_context with valid chain_id
+□ Test get_cross_post_context with invalid chain_id
+□ Test list_pending_telegram with empty queue
+□ Test list_pending_telegram with multiple messages
+□ Verify chain_id is preserved in metadata
+□ Verify content_type is in returned metadata
+□ Test integration with memory.queue_message()
+
+================================================================================
+QUICK REFERENCE TABLE
+================================================================================
+
+Function              | Required Args | Returns       | Main Use
+─────────────────────┼───────────────┼───────────────┼──────────────────────
+send_to_queue()       | text          | dict + id     | Put message in queue
+get_cross_post_context| chain_id      | dict + text   | Find Instagram post
+list_pending_telegram | none          | dict + items  | Show queue status
+
+Parameter             | Type   | Default | Used By
+──────────────────────┼────────┼─────────┼──────────────────────────
+text                  | str    | none    | send_to_queue
+channel_id            | str    | ""      | send_to_queue
+chat_id               | str    | ""      | send_to_queue
+chain_id              | str    | ""      | send_to_queue, get_cross_post_context
+content_type          | str    | ""      | send_to_queue
+limit                 | int    | 10      | list_pending_telegram
+
+================================================================================
