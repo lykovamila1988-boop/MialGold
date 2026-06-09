@@ -1,0 +1,233 @@
+╔════════════════════════════════════════════════════════════════════════════╗
+║               CHAIN_DASHBOARD.py — Краткая справка                         ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+📁 ФАЙЛЫ
+─────────────────────────────────────────────────────────────────────────────
+  chain_dashboard.py                  ← Основной модуль (500+ строк)
+  CHAIN_DASHBOARD_INTEGRATION.md       ← Инструкция по интеграции
+  CHAIN_DASHBOARD_EXAMPLE.py           ← Примеры использования
+  CHAIN_DASHBOARD_README.md            ← Полная документация
+  CHAIN_DASHBOARD_QUICKREF.txt        ← Этот файл
+
+
+🚀 БЫСТРЫЙ СТАРТ (4 шага)
+─────────────────────────────────────────────────────────────────────────────
+
+1️⃣  ИНТЕГРАЦИЯ В webapp.py
+   В webapp.py после строки `app = Flask(__name__)` добавить:
+
+   from chain_dashboard import chain_bp
+   app.register_blueprint(chain_bp)
+
+2️⃣  ЗАПУСТИТЬ ВЕБА
+   python webapp.py
+
+3️⃣  ОТКРЫТЬ ДАШБОРД
+   http://127.0.0.1:5000/chains
+
+4️⃣  (ОПЦИОНАЛЬНО) ДОБАВИТЬ ЛОГИРОВАНИЕ В pipeline.py
+   from chain_dashboard import log_chain_start, log_chain_step, log_chain_end
+   # See CHAIN_DASHBOARD_EXAMPLE.py for full integration
+
+
+🔗 МАРШРУТЫ
+─────────────────────────────────────────────────────────────────────────────
+
+ВЕБ-ИНТЕРФЕЙС:
+  GET /chains                          → HTML дашборд (браузер)
+
+API (JSON):
+  GET /chains/api/active              → активные цепочки
+  GET /chains/api/history             → история цепочек (последние N)
+  GET /chains/api/timeline            → что делает каждый агент
+  GET /chains/api/details/<chain_id>  → полные логи цепочки
+  GET /chains/api/metrics             → метрики производительности
+
+
+📊 ДАШБОРД ПОКАЗЫВАЕТ
+─────────────────────────────────────────────────────────────────────────────
+
+1️⃣  АКТИВНЫЕ ЦЕПОЧКИ
+   • ID цепочки
+   • От какого источника (n8n, user, external)
+   • Какие агенты в цепи
+   • Прошедшее время
+
+2️⃣  TIMELINE АГЕНТОВ
+   • Для каждого агента: работает или ждёт
+   • Если работает — в какой цепи и как долго
+
+3️⃣  ПРОИЗВОДИТЕЛЬНОСТЬ
+   • Среднее время по агентам
+   • Success rate (процент успеха)
+   • Количество задач
+
+4️⃣  ИСТОРИЯ ЦЕПОЧЕК
+   • Все завершённые цепи
+   • Статус (ok / failed)
+   • Общее время выполнения
+
+
+💻 ЛОГИРОВАНИЕ (из pipeline.py)
+─────────────────────────────────────────────────────────────────────────────
+
+Начало цепочки:
+  log_chain_start(
+    chain_id="my_chain_001",
+    from_agent="n8n",
+    agents=["agent1", "agent2", "agent3"],
+    description="Описание (опционально)"
+  )
+
+Завершение шага (после агента):
+  log_chain_step(
+    chain_id="my_chain_001",
+    agent="agent1",
+    step_num=1,
+    status="done",           # или "failed"
+    elapsed_ms=12345.0,
+    input_text="...",        # опционально
+    output_text="..."        # опционально
+  )
+
+Конец цепочки:
+  log_chain_end(
+    chain_id="my_chain_001",
+    status="ok",             # или "failed"
+    total_ms=45000.0,
+    error=""                 # опционально, если failed
+  )
+
+
+📡 ПРИМЕРЫ ЗАПРОСОВ
+─────────────────────────────────────────────────────────────────────────────
+
+Python:
+  import requests
+  resp = requests.get("http://127.0.0.1:5000/chains/api/active")
+  chains = resp.json()["chains"]
+
+Curl:
+  curl http://127.0.0.1:5000/chains/api/metrics
+
+JavaScript (в дашборде):
+  fetch("/chains/api/active").then(r => r.json())
+
+
+📝 СОБЫТИЯ В ПАМЯТИ (memory/events.jsonl)
+─────────────────────────────────────────────────────────────────────────────
+
+Событие: chain:start
+  {
+    "ts": "2026-06-08T10:30:45Z",
+    "kind": "chain:start",
+    "payload": {
+      "chain_id": "my_chain_001",
+      "from_agent": "n8n",
+      "agents": ["agent1", "agent2"],
+      "description": "..."
+    }
+  }
+
+Событие: chain:step
+  {
+    "ts": "2026-06-08T10:32:10Z",
+    "kind": "chain:step",
+    "payload": {
+      "chain_id": "my_chain_001",
+      "agent": "agent1",
+      "step_num": 1,
+      "status": "done",
+      "elapsed_ms": 85200
+    }
+  }
+
+Событие: chain:end
+  {
+    "ts": "2026-06-08T10:45:30Z",
+    "kind": "chain:end",
+    "payload": {
+      "chain_id": "my_chain_001",
+      "status": "ok",
+      "total_ms": 900000,
+      "error": ""
+    }
+  }
+
+
+⚙️ КОНФИГУРАЦИЯ
+─────────────────────────────────────────────────────────────────────────────
+
+Дефолты (в chain_dashboard.py):
+  • Дашборд автообновляется каждые 5 сек
+  • История показывает последние 50 цепочек
+  • События читаются из memory.EVENTS
+
+Переопределить:
+  • limit=100: GET /chains/api/history?limit=100
+  • status=failed: GET /chains/api/history?status=failed
+
+
+🐛 ОТЛАДКА
+─────────────────────────────────────────────────────────────────────────────
+
+Дашборд не показывает данные?
+  1. Проверить flask: ps | grep python → должен быть webapp.py
+  2. Проверить логи: tail logs/webapp.log
+  3. Проверить события: tail mila-office/memory/events.jsonl
+
+Импорт не работает?
+  from chain_dashboard import log_chain_start
+  → Убедиться, что chain_dashboard.py в одной папке с pipeline.py
+
+API возвращает 500?
+  → Проверить logs/webapp.log на ошибку парсинга JSON
+
+
+📚 ДОКУМЕНТАЦИЯ
+─────────────────────────────────────────────────────────────────────────────
+
+Полная интеграция:     CHAIN_DASHBOARD_INTEGRATION.md
+Примеры:              CHAIN_DASHBOARD_EXAMPLE.py
+Подробное описание:   CHAIN_DASHBOARD_README.md
+
+
+🎯 ТИПИЧНЫЙ WORKFLOW
+─────────────────────────────────────────────────────────────────────────────
+
+1. Запустить webapp.py:
+   python webapp.py
+
+2. Открыть дашборд в браузере:
+   http://127.0.0.1:5000/chains
+
+3. Запустить цепочку (например):
+   python pipeline.py content_week
+
+4. Видеть в реальном времени:
+   • Активные цепочки
+   • Timeline агентов
+   • Когда завершится — историю с временем
+
+
+🚨 ВАЖНО
+─────────────────────────────────────────────────────────────────────────────
+
+• Дашборд читает данные из memory.EVENTS (JSONL файл)
+• Без логирования (log_chain_*) дашборд будет пуст
+• Все события append-only (никогда не стираются)
+• На production может понадобиться ротация логов (раз в месяц)
+• Для локального офиса текущий подход нормален
+
+
+📞 КОНТАКТ / ВОПРОСЫ
+─────────────────────────────────────────────────────────────────────────────
+
+См. комментарии в коде:
+  - chain_dashboard.py: детальное объяснение функций
+  - CHAIN_DASHBOARD_INTEGRATION.md: step-by-step инструкция
+  - CHAIN_DASHBOARD_EXAMPLE.py: готовые к копированию примеры
+
+
+═══════════════════════════════════════════════════════════════════════════════

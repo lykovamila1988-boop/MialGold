@@ -1,0 +1,1072 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chain Monitoring Dashboard</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+            color: #333;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        header {
+            background: white;
+            padding: 25px;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            margin-bottom: 25px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 15px;
+        }
+
+        header h1 {
+            font-size: 28px;
+            color: #667eea;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .status-indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #10b981;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .header-stats {
+            display: flex;
+            gap: 25px;
+        }
+
+        .stat {
+            text-align: center;
+        }
+
+        .stat-value {
+            font-size: 24px;
+            font-weight: bold;
+            color: #667eea;
+        }
+
+        .stat-label {
+            font-size: 12px;
+            color: #999;
+            margin-top: 5px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .controls {
+            display: flex;
+            gap: 10px;
+        }
+
+        button {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 6px;
+            font-size: 14px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-weight: 500;
+        }
+
+        .btn-primary {
+            background: #667eea;
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: #5568d3;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        }
+
+        .btn-secondary {
+            background: #e5e7eb;
+            color: #333;
+        }
+
+        .btn-secondary:hover {
+            background: #d1d5db;
+        }
+
+        .dashboard-grid {
+            display: grid;
+            grid-template-columns: 1fr 2fr;
+            gap: 25px;
+            margin-bottom: 25px;
+        }
+
+        @media (max-width: 1200px) {
+            .dashboard-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .panel {
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            overflow: hidden;
+        }
+
+        .panel-header {
+            padding: 20px;
+            border-bottom: 1px solid #e5e7eb;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .panel-header h2 {
+            font-size: 18px;
+            color: #333;
+        }
+
+        .panel-body {
+            padding: 20px;
+            max-height: 600px;
+            overflow-y: auto;
+        }
+
+        .chain-list {
+            list-style: none;
+        }
+
+        .chain-item {
+            padding: 15px;
+            border: 1px solid #e5e7eb;
+            border-radius: 8px;
+            margin-bottom: 10px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .chain-item:hover {
+            border-color: #667eea;
+            background: #f8f9fa;
+            transform: translateX(4px);
+        }
+
+        .chain-item.active {
+            border-color: #667eea;
+            background: #f0f4ff;
+        }
+
+        .chain-info {
+            flex: 1;
+        }
+
+        .chain-name {
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 5px;
+        }
+
+        .chain-meta {
+            font-size: 12px;
+            color: #999;
+            display: flex;
+            gap: 15px;
+        }
+
+        .chain-status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            min-width: 100px;
+            justify-content: flex-end;
+        }
+
+        .status-badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .status-success {
+            background: #d1fae5;
+            color: #065f46;
+        }
+
+        .status-pending {
+            background: #fef3c7;
+            color: #92400e;
+        }
+
+        .status-error {
+            background: #fee2e2;
+            color: #991b1b;
+        }
+
+        .timeline-container {
+            padding: 20px;
+        }
+
+        .timeline {
+            position: relative;
+            padding-left: 40px;
+        }
+
+        .timeline::before {
+            content: '';
+            position: absolute;
+            left: 15px;
+            top: 0;
+            bottom: 0;
+            width: 2px;
+            background: linear-gradient(to bottom, #667eea, #764ba2);
+        }
+
+        .timeline-item {
+            margin-bottom: 25px;
+            position: relative;
+        }
+
+        .timeline-dot {
+            position: absolute;
+            left: -32px;
+            top: 3px;
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background: white;
+            border: 3px solid #667eea;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 10px;
+            color: #667eea;
+            font-weight: bold;
+        }
+
+        .timeline-item.completed .timeline-dot {
+            background: #667eea;
+            color: white;
+            border-color: #667eea;
+        }
+
+        .timeline-content {
+            background: #f9fafb;
+            padding: 12px 15px;
+            border-radius: 6px;
+            border-left: 3px solid #e5e7eb;
+        }
+
+        .timeline-item.completed .timeline-content {
+            border-left-color: #667eea;
+            background: #f0f4ff;
+        }
+
+        .timeline-title {
+            font-weight: 600;
+            font-size: 13px;
+            color: #333;
+            margin-bottom: 4px;
+        }
+
+        .timeline-time {
+            font-size: 11px;
+            color: #999;
+        }
+
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.5);
+            z-index: 1000;
+            align-items: center;
+            justify-content: center;
+            animation: fadeIn 0.3s ease;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+
+        .modal.active {
+            display: flex;
+        }
+
+        .modal-content {
+            background: white;
+            border-radius: 12px;
+            max-width: 700px;
+            width: 90%;
+            max-height: 80vh;
+            overflow-y: auto;
+            animation: slideUp 0.3s ease;
+            box-shadow: 0 20px 25px rgba(0, 0, 0, 0.15);
+        }
+
+        @keyframes slideUp {
+            from {
+                opacity: 0;
+                transform: translateY(30px);
+            }
+            to {
+                opacity: 0;
+                transform: translateY(0);
+            }
+        }
+
+        .modal-header {
+            padding: 25px;
+            border-bottom: 1px solid #e5e7eb;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .modal-header h2 {
+            font-size: 22px;
+            color: #333;
+        }
+
+        .close-btn {
+            background: none;
+            border: none;
+            font-size: 28px;
+            color: #999;
+            cursor: pointer;
+            padding: 0;
+            width: 30px;
+            height: 30px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .close-btn:hover {
+            color: #333;
+        }
+
+        .modal-body {
+            padding: 25px;
+        }
+
+        .detail-section {
+            margin-bottom: 25px;
+        }
+
+        .detail-section h3 {
+            font-size: 14px;
+            color: #667eea;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 12px;
+            font-weight: 600;
+        }
+
+        .detail-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+        }
+
+        .detail-item {
+            background: #f9fafb;
+            padding: 12px 15px;
+            border-radius: 6px;
+        }
+
+        .detail-label {
+            font-size: 11px;
+            color: #999;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 5px;
+        }
+
+        .detail-value {
+            font-size: 15px;
+            font-weight: 600;
+            color: #333;
+        }
+
+        .charts-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 25px;
+            margin-top: 25px;
+        }
+
+        @media (max-width: 1200px) {
+            .charts-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .chart-panel {
+            background: white;
+            border-radius: 12px;
+            padding: 25px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        .chart-title {
+            font-size: 16px;
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 20px;
+        }
+
+        .bar-chart {
+            display: flex;
+            align-items: flex-end;
+            gap: 12px;
+            height: 200px;
+        }
+
+        .bar {
+            flex: 1;
+            background: linear-gradient(to top, #667eea, #764ba2);
+            border-radius: 4px 4px 0 0;
+            position: relative;
+            min-height: 20px;
+            transition: all 0.3s ease;
+            cursor: pointer;
+        }
+
+        .bar:hover {
+            filter: brightness(1.1);
+            transform: scaleY(1.05);
+        }
+
+        .bar-label {
+            position: absolute;
+            bottom: -25px;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 11px;
+            color: #999;
+            white-space: nowrap;
+        }
+
+        .bar-value {
+            position: absolute;
+            top: -25px;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 12px;
+            font-weight: 600;
+            color: #667eea;
+        }
+
+        .line-chart {
+            position: relative;
+            height: 200px;
+            margin-bottom: 20px;
+        }
+
+        svg {
+            width: 100%;
+            height: 100%;
+        }
+
+        .chart-legend {
+            display: flex;
+            gap: 25px;
+            justify-content: center;
+            flex-wrap: wrap;
+            margin-top: 15px;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 12px;
+            color: #666;
+        }
+
+        .legend-color {
+            width: 12px;
+            height: 12px;
+            border-radius: 2px;
+        }
+
+        .success-color {
+            background: #10b981;
+        }
+
+        .pending-color {
+            background: #f59e0b;
+        }
+
+        .error-color {
+            background: #ef4444;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 40px 20px;
+            color: #999;
+        }
+
+        .empty-state-icon {
+            font-size: 48px;
+            margin-bottom: 15px;
+        }
+
+        .refresh-indicator {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 12px;
+            color: #999;
+        }
+
+        .refresh-spinner {
+            width: 12px;
+            height: 12px;
+            border: 2px solid #ddd;
+            border-top-color: #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .tooltip {
+            position: absolute;
+            background: #333;
+            color: white;
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-size: 11px;
+            white-space: nowrap;
+            pointer-events: none;
+            z-index: 100;
+            opacity: 0;
+            transition: opacity 0.3s ease;
+        }
+
+        .tooltip.visible {
+            opacity: 1;
+        }
+
+        @media (max-width: 768px) {
+            header {
+                flex-direction: column;
+                text-align: center;
+            }
+
+            .header-stats {
+                width: 100%;
+                justify-content: space-around;
+            }
+
+            .controls {
+                width: 100%;
+                justify-content: center;
+            }
+
+            .dashboard-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .charts-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .detail-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .chain-item {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 10px;
+            }
+
+            .chain-status {
+                width: 100%;
+                justify-content: flex-start;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>
+                <span class="status-indicator"></span>
+                Chain Monitoring
+            </h1>
+            <div class="header-stats">
+                <div class="stat">
+                    <div class="stat-value" id="totalChains">0</div>
+                    <div class="stat-label">Total Chains</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-value" id="activeChains">0</div>
+                    <div class="stat-label">Active</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-value" id="avgDuration">0ms</div>
+                    <div class="stat-label">Avg Duration</div>
+                </div>
+            </div>
+            <div class="controls">
+                <button class="btn-primary" onclick="refreshData()">
+                    <span class="refresh-indicator">
+                        <span class="refresh-spinner"></span>
+                        Refresh
+                    </span>
+                </button>
+                <button class="btn-secondary" onclick="toggleSettings()">Settings</button>
+            </div>
+        </header>
+
+        <div class="dashboard-grid">
+            <div class="panel">
+                <div class="panel-header">
+                    <h2>Active Chains</h2>
+                </div>
+                <div class="panel-body">
+                    <ul class="chain-list" id="chainList"></ul>
+                </div>
+            </div>
+
+            <div class="panel">
+                <div class="panel-header">
+                    <h2>Agent Timeline</h2>
+                </div>
+                <div class="timeline-container">
+                    <div class="timeline" id="timeline"></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="charts-grid">
+            <div class="chart-panel">
+                <div class="chart-title">Execution Status Distribution</div>
+                <div class="bar-chart" id="statusChart"></div>
+                <div class="chart-legend">
+                    <div class="legend-item">
+                        <div class="legend-color success-color"></div>
+                        <span>Completed</span>
+                    </div>
+                    <div class="legend-item">
+                        <div class="legend-color pending-color"></div>
+                        <span>Running</span>
+                    </div>
+                    <div class="legend-item">
+                        <div class="legend-color error-color"></div>
+                        <span>Failed</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="chart-panel">
+                <div class="chart-title">Performance Metrics (Last 7 Days)</div>
+                <div class="line-chart">
+                    <svg id="performanceChart" viewBox="0 0 500 200" preserveAspectRatio="xMidYMid meet"></svg>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal" id="detailsModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="modalTitle">Chain Details</h2>
+                <button class="close-btn" onclick="closeModal()">&times;</button>
+            </div>
+            <div class="modal-body" id="modalBody"></div>
+        </div>
+    </div>
+
+    <script>
+        // Mock data generator
+        const mockChains = [
+            {
+                id: 'chain_001',
+                name: 'Content Generation Pipeline',
+                status: 'completed',
+                agents: ['Marina', 'Victoria', 'Olya'],
+                startTime: new Date(Date.now() - 45000),
+                endTime: new Date(Date.now() - 15000),
+                duration: 30000,
+                successRate: 98,
+                executions: 156
+            },
+            {
+                id: 'chain_002',
+                name: 'Client CRM Sync',
+                status: 'running',
+                agents: ['Alina', 'Lera'],
+                startTime: new Date(Date.now() - 12000),
+                endTime: null,
+                duration: null,
+                successRate: 95,
+                executions: 89
+            },
+            {
+                id: 'chain_003',
+                name: 'Analytics Report Generation',
+                status: 'completed',
+                agents: ['Dima', 'Tyoma'],
+                startTime: new Date(Date.now() - 120000),
+                endTime: new Date(Date.now() - 95000),
+                duration: 25000,
+                successRate: 100,
+                executions: 45
+            },
+            {
+                id: 'chain_004',
+                name: 'Telegram Post Scheduler',
+                status: 'error',
+                agents: ['Tyoma', 'Vasya'],
+                startTime: new Date(Date.now() - 8000),
+                endTime: new Date(Date.now() - 5000),
+                duration: 3000,
+                successRate: 87,
+                executions: 234
+            },
+            {
+                id: 'chain_005',
+                name: 'Reel Adaptation Service',
+                status: 'running',
+                agents: ['Marina', 'Victoria'],
+                startTime: new Date(Date.now() - 35000),
+                endTime: null,
+                duration: null,
+                successRate: 92,
+                executions: 178
+            },
+            {
+                id: 'chain_006',
+                name: 'DM Lead Classification',
+                status: 'completed',
+                agents: ['Alina', 'Marina'],
+                startTime: new Date(Date.now() - 200000),
+                endTime: new Date(Date.now() - 170000),
+                duration: 30000,
+                successRate: 99,
+                executions: 567
+            }
+        ];
+
+        const agentTimeline = [
+            { agent: 'Marina', task: 'Content planning', duration: '8s', completed: true },
+            { agent: 'Victoria', task: 'Content editing', duration: '12s', completed: true },
+            { agent: 'Olya', task: 'Trend analysis', duration: '5s', completed: true },
+            { agent: 'Alina', task: 'Client intake', duration: '3s', completed: true },
+            { agent: 'Vasya', task: 'Post scheduling', duration: '2s', completed: false }
+        ];
+
+        let selectedChain = null;
+        let chains = [...mockChains];
+
+        // Initialize dashboard
+        function initDashboard() {
+            renderChainList();
+            renderTimeline();
+            renderStatusChart();
+            renderPerformanceChart();
+            updateStats();
+
+            // Auto-refresh every 5 seconds
+            setInterval(() => {
+                updateMockData();
+                renderChainList();
+                renderTimeline();
+                updateStats();
+            }, 5000);
+        }
+
+        function updateMockData() {
+            chains.forEach(chain => {
+                // Update running chains
+                if (chain.status === 'running' && chain.startTime) {
+                    chain.duration = Date.now() - chain.startTime.getTime();
+                    // Randomly complete some chains
+                    if (Math.random() > 0.85) {
+                        chain.status = 'completed';
+                        chain.endTime = new Date();
+                    }
+                }
+            });
+        }
+
+        function renderChainList() {
+            const chainList = document.getElementById('chainList');
+            chainList.innerHTML = chains.map(chain => `
+                <li class="chain-item ${selectedChain?.id === chain.id ? 'active' : ''}" onclick="selectChain('${chain.id}')">
+                    <div class="chain-info">
+                        <div class="chain-name">${chain.name}</div>
+                        <div class="chain-meta">
+                            <span>🤖 ${chain.agents.length} agents</span>
+                            <span>⏱️ ${formatDuration(chain.duration || Date.now() - chain.startTime.getTime())}</span>
+                        </div>
+                    </div>
+                    <div class="chain-status">
+                        <span class="status-badge status-${chain.status}">
+                            ${chain.status === 'completed' ? '✓' : chain.status === 'running' ? '⟳' : '✕'}
+                            ${chain.status}
+                        </span>
+                    </div>
+                </li>
+            `).join('');
+        }
+
+        function selectChain(chainId) {
+            selectedChain = chains.find(c => c.id === chainId);
+            renderChainList();
+            if (selectedChain) {
+                showChainDetails();
+            }
+        }
+
+        function showChainDetails() {
+            if (!selectedChain) return;
+
+            const modal = document.getElementById('detailsModal');
+            const modalTitle = document.getElementById('modalTitle');
+            const modalBody = document.getElementById('modalBody');
+
+            modalTitle.textContent = selectedChain.name;
+            modalBody.innerHTML = `
+                <div class="detail-section">
+                    <h3>Chain Status</h3>
+                    <div class="detail-grid">
+                        <div class="detail-item">
+                            <div class="detail-label">Status</div>
+                            <div class="detail-value">
+                                <span class="status-badge status-${selectedChain.status}">
+                                    ${selectedChain.status.toUpperCase()}
+                                </span>
+                            </div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">Duration</div>
+                            <div class="detail-value">${formatDuration(selectedChain.duration || Date.now() - selectedChain.startTime.getTime())}</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">Success Rate</div>
+                            <div class="detail-value">${selectedChain.successRate}%</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">Total Executions</div>
+                            <div class="detail-value">${selectedChain.executions}</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="detail-section">
+                    <h3>Agents Involved</h3>
+                    <div class="detail-grid">
+                        ${selectedChain.agents.map(agent => `
+                            <div class="detail-item">
+                                <div class="detail-label">Agent</div>
+                                <div class="detail-value">🤖 ${agent}</div>
+                            </div>
+                        `).join('')}
+                    </div>
+                </div>
+
+                <div class="detail-section">
+                    <h3>Timeline</h3>
+                    <div class="detail-grid">
+                        <div class="detail-item">
+                            <div class="detail-label">Started</div>
+                            <div class="detail-value">${selectedChain.startTime.toLocaleTimeString()}</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">Ended</div>
+                            <div class="detail-value">${selectedChain.endTime ? selectedChain.endTime.toLocaleTimeString() : 'Running...'}</div>
+                        </div>
+                    </div>
+                </div>
+            `;
+
+            modal.classList.add('active');
+        }
+
+        function closeModal() {
+            document.getElementById('detailsModal').classList.remove('active');
+        }
+
+        function renderTimeline() {
+            const timeline = document.getElementById('timeline');
+            timeline.innerHTML = agentTimeline.map((item, index) => `
+                <div class="timeline-item ${item.completed ? 'completed' : ''}">
+                    <div class="timeline-dot">${index + 1}</div>
+                    <div class="timeline-content">
+                        <div class="timeline-title">${item.agent}: ${item.task}</div>
+                        <div class="timeline-time">Duration: ${item.duration}</div>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function renderStatusChart() {
+            const completed = chains.filter(c => c.status === 'completed').length;
+            const running = chains.filter(c => c.status === 'running').length;
+            const failed = chains.filter(c => c.status === 'error').length;
+
+            const total = chains.length;
+            const maxHeight = 150;
+
+            const statusChart = document.getElementById('statusChart');
+            statusChart.innerHTML = `
+                <div class="bar" style="height: ${(completed / total) * maxHeight}px;" title="Completed: ${completed}">
+                    <div class="bar-value">${completed}</div>
+                    <div class="bar-label">Completed</div>
+                </div>
+                <div class="bar" style="height: ${(running / total) * maxHeight}px;" title="Running: ${running}">
+                    <div class="bar-value">${running}</div>
+                    <div class="bar-label">Running</div>
+                </div>
+                <div class="bar" style="height: ${(failed / total) * maxHeight}px;" title="Failed: ${failed}">
+                    <div class="bar-value">${failed}</div>
+                    <div class="bar-label">Failed</div>
+                </div>
+            `;
+        }
+
+        function renderPerformanceChart() {
+            const svg = document.getElementById('performanceChart');
+            const width = 500;
+            const height = 200;
+            const padding = 30;
+
+            // Mock performance data for 7 days
+            const data = [85, 88, 82, 90, 87, 92, 95];
+            const pointSpacing = (width - padding * 2) / (data.length - 1);
+
+            // Create line path
+            let pathD = `M ${padding} ${height - padding - (data[0] / 100) * (height - padding * 2)}`;
+            for (let i = 1; i < data.length; i++) {
+                const x = padding + i * pointSpacing;
+                const y = height - padding - (data[i] / 100) * (height - padding * 2);
+                pathD += ` L ${x} ${y}`;
+            }
+
+            // Create SVG elements
+            let svgContent = `
+                <defs>
+                    <linearGradient id="lineGradient" x1="0%" y1="0%" x2="0%" y2="100%">
+                        <stop offset="0%" style="stop-color:#667eea;stop-opacity:0.3" />
+                        <stop offset="100%" style="stop-color:#667eea;stop-opacity:0" />
+                    </linearGradient>
+                </defs>
+
+                <!-- Grid lines -->
+                <line x1="${padding}" y1="${padding}" x2="${width - padding}" y2="${padding}" stroke="#e5e7eb" stroke-width="1"/>
+                <line x1="${padding}" y1="${height - padding}" x2="${width - padding}" y2="${height - padding}" stroke="#e5e7eb" stroke-width="1"/>
+
+                <!-- Y-axis labels -->
+                <text x="${padding - 10}" y="${padding + 5}" font-size="11" fill="#999" text-anchor="end">100%</text>
+                <text x="${padding - 10}" y="${height - padding + 5}" font-size="11" fill="#999" text-anchor="end">0%</text>
+
+                <!-- Line chart -->
+                <path d="${pathD}" stroke="#667eea" stroke-width="2" fill="none"/>
+
+                <!-- Data points -->
+            `;
+
+            for (let i = 0; i < data.length; i++) {
+                const x = padding + i * pointSpacing;
+                const y = height - padding - (data[i] / 100) * (height - padding * 2);
+                svgContent += `<circle cx="${x}" cy="${y}" r="4" fill="#667eea" stroke="white" stroke-width="2"/>`;
+            }
+
+            // X-axis labels
+            const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+            for (let i = 0; i < data.length; i++) {
+                const x = padding + i * pointSpacing;
+                svgContent += `<text x="${x}" y="${height - 10}" font-size="11" fill="#999" text-anchor="middle">${days[i]}</text>`;
+            }
+
+            svg.innerHTML = svgContent;
+        }
+
+        function updateStats() {
+            const totalChains = chains.length;
+            const activeChains = chains.filter(c => c.status === 'running').length;
+            const avgDuration = Math.round(
+                chains.filter(c => c.duration).reduce((sum, c) => sum + c.duration, 0) /
+                chains.filter(c => c.duration).length
+            );
+
+            document.getElementById('totalChains').textContent = totalChains;
+            document.getElementById('activeChains').textContent = activeChains;
+            document.getElementById('avgDuration').textContent = avgDuration + 'ms';
+        }
+
+        function formatDuration(ms) {
+            if (!ms) return '0s';
+            const seconds = Math.round(ms / 1000);
+            if (seconds < 60) return seconds + 's';
+            const minutes = Math.round(seconds / 60);
+            return minutes + 'm';
+        }
+
+        function refreshData() {
+            updateMockData();
+            renderChainList();
+            renderTimeline();
+            renderStatusChart();
+            renderPerformanceChart();
+            updateStats();
+        }
+
+        function toggleSettings() {
+            alert('Settings panel would open here');
+        }
+
+        // Close modal when clicking outside
+        document.getElementById('detailsModal').addEventListener('click', (e) => {
+            if (e.target.id === 'detailsModal') {
+                closeModal();
+            }
+        });
+
+        // Initialize on page load
+        window.addEventListener('load', initDashboard);
+    </script>
+</body>
+</html>

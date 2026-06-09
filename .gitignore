@@ -27,9 +27,13 @@ node_modules/
 
 # ── n8n local runtime (cache, sqlite, credentials) ──────────────
 n8n-data/
+n8n-data/.cache/
+n8n/
 
 # ── Generated / runtime data ────────────────────────────────────
 logs/
+logs/*.log
+logs/archive/
 reports/
 backups/
 

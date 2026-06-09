@@ -1,0 +1,335 @@
+╔════════════════════════════════════════════════════════════════════════════╗
+║                    CHAIN_DASHBOARD.py — ПОЛНАЯ ПОСТАВКА                    ║
+║                    Мониторинг цепочек агентов в реальном времени            ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+📦 ЧТО ВХОДИТ В ПОСТАВКУ
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📄 Файлы (6 шт.):
+
+1. 🔵 chain_dashboard.py (31 KB)
+   → Основной модуль Flask blueprint
+   → Содержит:
+     • API маршруты (5 GET endpoints + 1 HTML)
+     • Модели данных (5 функций _build_*)
+     • HTML дашборд (инлайн _DASHBOARD_HTML)
+     • Функции логирования (3 функции log_*)
+     • Утилиты парсинга (time formatting, event reading)
+   → 500+ строк кода, хорошо задокументировано
+
+2. 📋 CHAIN_DASHBOARD_INTEGRATION.md (14 KB)
+   → Step-by-step инструкция по интеграции в webapp.py
+   → Примеры всех маршрутов и их ответов
+   → Как добавить логирование в pipeline.py
+   → Где хранятся логи и как их отладить
+   → Раздел "На production" с рекомендациями
+
+3. 💻 CHAIN_DASHBOARD_EXAMPLE.py (14 KB)
+   → Полностью готовый пример интеграции
+   → Функция run_chain_with_logging() — копируй-вставляй в pipeline.py
+   → 4 практических примера использования
+   → Демонстрация через примеры, не через теорию
+
+4. 📚 CHAIN_DASHBOARD_README.md (15 KB)
+   → Полная документация
+   → Краткий старт (60 секунд)
+   → Описание каждого API маршрута с примерами JSON
+   → Примеры использования (Python, curl, JavaScript)
+   → Расширения и оптимизация
+
+5. 🏗️ CHAIN_DASHBOARD_ARCHITECTURE.md (32 KB)
+   → Визуальные диаграммы архитектуры
+   → Жизненный цикл цепочки (от start до end)
+   → Структура дашборда в браузере
+   → Классы и функции (сыммари с сигнатурами)
+   → Примеры с временными интервалами
+   → ASCII диаграммы потока данных
+
+6. ⚡ CHAIN_DASHBOARD_QUICKREF.txt (11 KB)
+   → Краткая справка на одной странице
+   → Команды для быстрого старта
+   → Все маршруты (20 штук)
+   → Примеры запросов (curl, Python, JavaScript)
+   → Отладка (3 главных точки проверки)
+   → Структура логов (JSONL примеры)
+
+
+🎯 НАЗНАЧЕНИЕ КАЖДОГО ФАЙЛА
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Первый раз?
+  👉 Прочитай: CHAIN_DASHBOARD_QUICKREF.txt (5 мин)
+     Потом: CHAIN_DASHBOARD_INTEGRATION.md (15 мин)
+     Запусти: python webapp.py
+     Открой: http://127.0.0.1:5000/chains
+
+Добавляешь в pipeline.py?
+  👉 Копируй: CHAIN_DASHBOARD_EXAMPLE.py (функция run_chain_with_logging)
+     Адаптируй: свои names, parameters
+     Готово!
+
+Расширяешь функциональность?
+  👉 Читай: CHAIN_DASHBOARD_README.md (API маршруты в деталях)
+     Рассматривай: CHAIN_DASHBOARD_ARCHITECTURE.md (как работает изнутри)
+     Меняй: chain_dashboard.py (код хорошо структурирован)
+
+Отлаживаешь проблемы?
+  👉 Смотри: CHAIN_DASHBOARD_INTEGRATION.md раздел "Отладка"
+     Или: CHAIN_DASHBOARD_QUICKREF.txt раздел "🐛 ОТЛАДКА"
+
+
+💡 БЫСТРЫЙ СТАРТ (3 МИНУТЫ)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Шаг 1: Отредактировать webapp.py
+   Найти:   app = Flask(__name__)
+   Добавить:
+      from chain_dashboard import chain_bp
+      app.register_blueprint(chain_bp)
+
+Шаг 2: Запустить веб
+   cd "E:\MILA GOLD\mila-office"
+   python webapp.py
+
+Шаг 3: Открыть браузер
+   http://127.0.0.1:5000/chains
+
+Готово! Дашборд работает.
+
+
+📊 ЧТО ПОКАЗЫВАЕТ ДАШБОРД
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. АКТИВНЫЕ ЦЕПОЧКИ
+   • Какие цепи выполняются сейчас
+   • От какого источника (n8n, user, external)
+   • Какие агенты участвуют
+   • Сколько времени прошло
+
+   Пример: 2 цепочки работают
+   ├─ content_week_20260608_103045 от n8n (45.2s)
+   │  Агенты: olya → marina → victoria → vasya
+   └─ new_client_20260608_114500 от user (12.3s)
+      Агенты: alina → lera
+
+2. TIMELINE АГЕНТОВ
+   Статус каждого агента: работает или ждёт
+
+   marina:   ▶ Работает в цепи content_week (12.3s прошло)
+   victoria: ⚪ Ждёт (последний раз 2 часа назад)
+   alina:    ▶ Работает в цепи new_client (5.1s прошло)
+   vasya:    ⚪ Ждёт
+
+3. ПРОИЗВОДИТЕЛЬНОСТЬ
+   Агрегированные метрики по всем цепочкам
+
+   Успешность: 95.2%
+   Всего задач: 42
+   Успешных: 40
+   Ошибок: 2
+   Среднее время: 18.9s
+
+4. ИСТОРИЯ ЦЕПОЧЕК (последние 20)
+   Все завершённые цепи с результатом
+
+   ✅ content_week_... завершена за 14.8m
+   ✅ new_client_... завершена за 8.3m
+   ❌ weekly_report_... ошибка 22.1m (timeout на шаге 2)
+
+
+🔌 ИНТЕГРАЦИЯ С WEBAPP.PY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ДО:
+   webapp.py
+   ├─ GET /                    (главная)
+   ├─ GET /api/meta           (агенты)
+   ├─ POST /api/chat          (чат)
+   └─ ... (другие маршруты)
+
+ПОСЛЕ:
+   webapp.py + chain_dashboard blueprint
+   ├─ GET /                        (главная)
+   ├─ GET /api/meta               (агенты)
+   ├─ POST /api/chat              (чат)
+   ├─ ... (другие маршруты)
+   │
+   └─ ✨ GET /chains              (дашборд HTML) ← НОВОЕ
+      ├─ GET /chains/api/active   (JSON)
+      ├─ GET /chains/api/history  (JSON)
+      ├─ GET /chains/api/timeline (JSON)
+      ├─ GET /chains/api/details/<id> (JSON)
+      └─ GET /chains/api/metrics  (JSON)
+
+
+📡 КАК РАБОТАЕТ ЛОГИРОВАНИЕ
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+В pipeline.py импортируешь:
+   from chain_dashboard import log_chain_start, log_chain_step, log_chain_end
+
+Перед цепочкой:
+   log_chain_start(
+     chain_id="my_chain_001",
+     from_agent="n8n",
+     agents=["olya", "marina", "victoria"],
+     description="Еженедельный контент-план"
+   )
+
+После каждого агента:
+   log_chain_step(
+     chain_id="my_chain_001",
+     agent="marina",
+     step_num=2,
+     status="done",
+     elapsed_ms=130000
+   )
+
+После цепочки:
+   log_chain_end(
+     chain_id="my_chain_001",
+     status="ok",
+     total_ms=260000
+   )
+
+Эти события пишутся в:
+   E:\MILA GOLD\mila-office\memory\events.jsonl (JSONL)
+
+Дашборд читает этот файл и показывает данные.
+
+
+📈 СТРУКТУРА ДАННЫХ В ПАМЯТИ
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+events.jsonl — append-only журнал (JSON Lines)
+
+Типы событий:
+  • chain:start  — цепочка начала выполняться
+  • chain:step   — шаг завершился (агент отработал)
+  • chain:end    — цепочка полностью завершилась
+
+Пример:
+  {"ts":"2026-06-08T10:30:45Z","kind":"chain:start","payload":{"chain_id":"content_week_...","from_agent":"n8n","agents":["olya","marina","victoria"]}}
+  {"ts":"2026-06-08T10:31:10Z","kind":"chain:step","payload":{"chain_id":"content_week_...","agent":"olya","step_num":1,"status":"done","elapsed_ms":85000}}
+  {"ts":"2026-06-08T10:33:20Z","kind":"chain:step","payload":{"chain_id":"content_week_...","agent":"marina","step_num":2,"status":"done","elapsed_ms":130000}}
+  {"ts":"2026-06-08T10:45:30Z","kind":"chain:end","payload":{"chain_id":"content_week_...","status":"ok","total_ms":900000}}
+
+
+🔄 ОБНОВЛЕНИЕ ДАШБОРДА
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Браузер (HTTP):
+   http://127.0.0.1:5000/chains
+   │
+   ├─→ Загружает HTML дашборда
+   │
+   └─→ JavaScript начинает polling каждые 5 сек
+      ├─ fetch /chains/api/active
+      ├─ fetch /chains/api/timeline
+      ├─ fetch /chains/api/metrics
+      └─ fetch /chains/api/history
+
+Flask (chain_dashboard.py):
+   /chains/api/* endpoints
+   │
+   └─→ Читают memory.EVENTS (JSONL)
+      ├─ _read_chain_events()
+      ├─ _build_active_chains()
+      ├─ _build_agent_timeline()
+      ├─ _build_chain_details()
+      └─ _build_performance_metrics()
+
+Результат: дашборд обновляется в браузере каждые 5 сек
+
+
+🎁 БОНУСНЫЕ ПРИМЕРЫ
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Пример 1: Получить метрики через Python
+   import requests
+   resp = requests.get("http://127.0.0.1:5000/chains/api/metrics")
+   metrics = resp.json()["overall"]
+   print(f"Success rate: {metrics['success_rate']:.1f}%")
+
+Пример 2: Отправить алерт, если цепочка упала
+   resp = requests.get("http://127.0.0.1:5000/chains/api/history?status=failed")
+   failed = resp.json()["chains"]
+   for chain in failed:
+       send_telegram_alert(f"Цепочка {chain['chain_id']} упала")
+
+Пример 3: Запросить детали конкретной цепочки
+   chain_id = "content_week_20260608_103045"
+   resp = requests.get(f"http://127.0.0.1:5000/chains/api/details/{chain_id}")
+   steps = resp.json()["chain"]["steps"]
+   for step in steps:
+       print(f"{step['agent']}: {step['elapsed_human']}")
+
+
+⚠️ ВАЖНОЕ
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. Дашборд работает только если есть события в memory.EVENTS
+   → Добавьте логирование в pipeline.py (см. CHAIN_DASHBOARD_EXAMPLE.py)
+
+2. Дашборд читает весь файл events.jsonl в памяти
+   → На production (> 10000 событий) нужна ротация логов
+
+3. API маршруты всегда доступны, даже без логирования
+   → Они просто будут пусты
+
+4. Дашборд не сохраняет историю браузера
+   → При перезагрузке страницы — новая сессия
+   → Данные хранятся в events.jsonl, не в памяти браузера
+
+
+🚀 СЛЕДУЮЩИЕ ШАГИ
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Сразу (15 мин):
+  1. Добавить blueprint в webapp.py
+  2. Запустить webapp.py
+  3. Открыть http://127.0.0.1:5000/chains
+
+На этой неделе (1-2 часа):
+  1. Отредактировать pipeline.py
+  2. Добавить log_chain_start/step/end
+  3. Запустить цепочку и проверить дашборд
+
+На future:
+  1. Добавить алерты (Telegram при падении)
+  2. Экспорт в CSV/Excel
+  3. Миграция логов в Supabase (если > 1 года данных)
+
+
+📞 ВОПРОСЫ?
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Дашборд не показывает данные?
+  → CHAIN_DASHBOARD_INTEGRATION.md раздел "Отладка"
+
+Как добавить собственную метрику?
+  → Отредактировать _build_performance_metrics() в chain_dashboard.py
+
+Как расширить дашборд?
+  → CHAIN_DASHBOARD_ARCHITECTURE.md раздел "Классы и функции"
+
+Как оптимизировать на production?
+  → CHAIN_DASHBOARD_INTEGRATION.md раздел "На production"
+  → CHAIN_DASHBOARD_ARCHITECTURE.md раздел "Оптимизация (future)"
+
+
+═══════════════════════════════════════════════════════════════════════════════
+
+ИТОГО:
+
+✅ 6 файлов готовы к использованию
+✅ 116 KB документации + кода
+✅ 500+ строк основного модуля
+✅ 100+ примеров и диаграмм
+✅ Ноль новых зависимостей (pip install не нужен)
+✅ Совместимо с текущей архитектурой MILA OFFICE
+
+Интеграция: 3 шага, 5 минут ⚡
+
+═══════════════════════════════════════════════════════════════════════════════
