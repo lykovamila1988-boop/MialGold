@@ -1,6 +1,6 @@
 """Дима — Финансовый агент. python dima.py"""
 from base import *
-from shared_tools import gumroad_sales as get_gumroad_sales, calc_ltv_and_mrr
+from shared_tools import gumroad_sales as get_gumroad_sales, calc_ltv_and_mrr, get_purchases_data, get_consultations_data, check_supabase_access
 import memory
 
 SYSTEM = """Ты — Дима, финансовый агент Людмилы Лыковой. Считаешь деньги, строишь прогнозы, отслеживаешь рост бизнеса.
@@ -64,12 +64,23 @@ TOOLS = core_tools("Читать финансовые данные",
      "input_schema": {"type": "object", "properties": {
          "days": {"type": "integer", "description": "Количество дней для анализа", "default": 7}
      }}},
+    {"name": "get_purchases_data", "description": "Получить покупки из Supabase (детальные данные: сумма, способ платежа, дата)",
+     "input_schema": {"type": "object", "properties": {
+         "days": {"type": "integer", "default": 30}}}},
+    {"name": "get_consultations_data", "description": "Получить консультации из Supabase (завершённые, с датами)",
+     "input_schema": {"type": "object", "properties": {
+         "days": {"type": "integer", "default": 30}}}},
+    {"name": "check_supabase_access", "description": "Проверить статус доступа к Supabase (диагностика блокировок)",
+     "input_schema": {"type": "object", "properties": {}}},
 ]
 
 def handle(name, inp):
     if name == "gumroad_sales": return get_gumroad_sales(limit=20)
     if name == "calc_ltv_and_mrr": return calc_ltv_and_mrr()
     if name == "automation_stats": return automation_stats(inp.get("days", 7))
+    if name == "get_purchases_data": return get_purchases_data(inp.get("days", 30))
+    if name == "get_consultations_data": return get_consultations_data(inp.get("days", 30))
+    if name == "check_supabase_access": return check_supabase_access()
     res = core_handle(name, inp, list_default="05-analytics")
     return res if res is not None else f"Неизвестный инструмент: {name}"
 

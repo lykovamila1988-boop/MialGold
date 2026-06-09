@@ -304,6 +304,78 @@ def get_weekly_analytics(days=7):
         return f"Ошибка получения аналитики: {e}"
 
 
+# ─── SUPABASE ДАННЫЕ ──────────────────────────────────────────
+# Доступ к таблицам базы данных для агентов
+
+def get_ig_posts_data(days=30):
+    """Получить Instagram посты из Supabase для аналитики."""
+    try:
+        from _common import get_ig_posts
+        posts = get_ig_posts(days=days)
+        return json.dumps({
+            "status": "ok" if posts else "empty",
+            "count": len(posts),
+            "posts": posts[:20]  # первые 20 для агента
+        }, ensure_ascii=False, indent=2)
+    except Exception as e:
+        return f"Ошибка: {e}"
+
+
+def get_telegram_leads_data(status=None, days=7):
+    """Получить Telegram лидов из Supabase."""
+    try:
+        from _common import get_telegram_leads
+        leads = get_telegram_leads(status=status, days=days)
+        return json.dumps({
+            "status": "ok" if leads else "empty",
+            "count": len(leads),
+            "by_status": {},
+            "leads": leads[:20]
+        }, ensure_ascii=False, indent=2)
+    except Exception as e:
+        return f"Ошибка: {e}"
+
+
+def get_purchases_data(days=30):
+    """Получить покупки из Supabase."""
+    try:
+        from _common import get_purchases
+        purchases = get_purchases(days=days)
+        total = sum(p.get("amount_cad", 0) for p in purchases)
+        return json.dumps({
+            "status": "ok" if purchases else "empty",
+            "count": len(purchases),
+            "total_cad": round(total, 2),
+            "purchases": purchases[:20]
+        }, ensure_ascii=False, indent=2)
+    except Exception as e:
+        return f"Ошибка: {e}"
+
+
+def get_consultations_data(days=30):
+    """Получить консультации из Supabase."""
+    try:
+        from _common import get_consultations_from_db
+        consultations = get_consultations_from_db(days=days)
+        return json.dumps({
+            "status": "ok" if consultations else "empty",
+            "count": len(consultations),
+            "consultations": consultations[:20]
+        }, ensure_ascii=False, indent=2)
+    except Exception as e:
+        return f"Ошибка: {e}"
+
+
+def check_supabase_access():
+    """Проверить статус доступа к Supabase."""
+    try:
+        from _common import get_supabase_status
+        status = get_supabase_status()
+        return json.dumps(status, ensure_ascii=False, indent=2)
+    except Exception as e:
+        return f"Ошибка: {e}"
+
+
 def measure_sales_funnel(days=30):
     """Измерить воронку продаж: коррелирование постов с продажами (для Lera).
     Читает отчёты аналитики и Gumroad, вычисляет CTR и конверсию."""

@@ -407,3 +407,175 @@ def get_consultations(days=30):
     except Exception as e:
         print(f"[!] Ошибка при получении консультаций из Calendly: {e}", file=sys.stderr)
         return []
+
+
+# ─── SUPABASE DATABASE ACCESS ──────────────────────────────────
+# Высокоуровневые функции для доступа к таблицам Supabase
+# Требует SUPABASE_SERVICE_ROLE_KEY в .env для обхода RLS
+
+def _get_supa():
+    """Загрузить модуль supa с обработкой ошибок."""
+    try:
+        import supa
+        if not supa.available():
+            raise Exception("Supabase не настроен (нет SUPABASE_URL или ключа)")
+        return supa
+    except ImportError:
+        raise Exception("Модуль supa не найден в tools/")
+
+
+def get_ig_posts(days=30, limit=100):
+    """Получить публикации Instagram из Supabase (ig_posts таблица).
+
+    Возвращает список:
+    [
+        {
+            "media_id": "...",
+            "post_date": "2026-06-08",
+            "media_type": "IMAGE",
+            "theme": "attachment",
+            "reach": 1234,
+            "likes": 45,
+            "comments": 8,
+            "caption": "...",
+            "permalink": "..."
+        }
+    ]
+    """
+    try:
+        supa = _get_supa()
+        cutoff_date = (datetime.datetime.utcnow() - datetime.timedelta(days=days)).date().isoformat()
+        rows = supa.select(
+            "ig_posts",
+            columns="media_id,post_date,media_type,theme,reach,likes,comments,caption,permalink",
+            filters={"post_date": f"gte.{cutoff_date}"},
+            order="post_date.desc",
+            limit=limit
+        )
+        return rows
+    except Exception as e:
+        print(f"[!] Ошибка при получении Instagram постов: {e}", file=sys.stderr)
+        return []
+
+
+def get_telegram_leads(status=None, days=30, limit=100):
+    """Получить Telegram лидов из Supabase (telegram_leads таблица).
+
+    status: None (все), 'new', 'warm', 'hot', 'converted', 'inactive'
+
+    Возвращает список:
+    [
+        {
+            "tg_user_id": "...",
+            "tg_username": "...",
+            "tg_name": "...",
+            "status": "new",
+            "wrote_want": true,
+            "messages_count": 5,
+            "last_message": "...",
+            "created_at": "2026-06-08T10:30:00Z"
+        }
+    ]
+    """
+    try:
+        supa = _get_supa()
+        cutoff_date = (datetime.datetime.utcnow() - datetime.timedelta(days=days)).isoformat()
+
+        filters = {"created_at": f"gte.{cutoff_date}"}
+        if status:
+            filters["status"] = f"eq.{status}"
+
+        rows = supa.select(
+            "telegram_leads",
+            columns="tg_user_id,tg_username,tg_name,status,wrote_want,messages_count,last_message,created_at",
+            filters=filters,
+            order="created_at.desc",
+            limit=limit
+        )
+        return rows
+    except Exception as e:
+        print(f"[!] Ошибка при получении Telegram лидов: {e}", file=sys.stderr)
+        return []
+
+
+def get_purchases(days=30, limit=100):
+    """Получить покупки из Supabase (purchases таблица).
+
+    Возвращает список:
+    [
+        {
+            "id": "...",
+            "user_id": "...",
+            "product_id": "...",
+            "amount_cad": 37.00,
+            "currency": "CAD",
+            "payment_method": "gumroad",
+            "status": "completed",
+            "created_at": "2026-06-08T10:30:00Z"
+        }
+    ]
+    """
+    try:
+        supa = _get_supa()
+        cutoff_date = (datetime.datetime.utcnow() - datetime.timedelta(days=days)).isoformat()
+
+        rows = supa.select(
+            "purchases",
+            columns="id,user_id,product_id,amount_cad,currency,payment_method,status,created_at",
+            filters={
+                "created_at": f"gte.{cutoff_date}",
+                "status": "eq.completed"
+            },
+            order="created_at.desc",
+            limit=limit
+        )
+        return rows
+    except Exception as e:
+        print(f"[!] Ошибка при получении покупок: {e}", file=sys.stderr)
+        return []
+
+
+def get_consultations_from_db(days=30, limit=100):
+    """Получить консультации из Supabase (consultations таблица).
+
+    Возвращает список:
+    [
+        {
+            "id": "...",
+            "user_id": "...",
+            "type": "single",
+            "status": "completed",
+            "scheduled_at": "2026-06-08T10:00:00Z",
+            "completed_at": "2026-06-08T11:00:00Z",
+            "duration_min": 60,
+            "platform": "zoom"
+        }
+    ]
+    """
+    try:
+        supa = _get_supa()
+        cutoff_date = (datetime.datetime.utcnow() - datetime.timedelta(days=days)).isoformat()
+
+        rows = supa.select(
+            "consultations",
+            columns="id,user_id,type,status,scheduled_at,completed_at,duration_min,platform",
+            filters={
+                "completed_at": f"gte.{cutoff_date}",
+                "status": "eq.completed"
+            },
+            order="completed_at.desc",
+            limit=limit
+        )
+        return rows
+    except Exception as e:
+        print(f"[!] Ошибка при получении консультаций: {e}", file=sys.stderr)
+        return []
+
+
+def get_supabase_status():
+    """Проверить статус подключения к Supabase."""
+    try:
+        supa = _get_supa()
+        return supa.status()
+    except Exception as e:
+        return {"error": str(e), "can_write": False}

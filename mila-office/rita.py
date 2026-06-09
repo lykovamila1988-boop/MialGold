@@ -3,6 +3,7 @@
 import glob
 import json as _json
 from base import *
+from shared_tools import get_ig_posts_data, get_telegram_leads_data, get_purchases_data, check_supabase_access
 
 SYSTEM = """Ты — Рита, product architect Людмилы Лыковой.
 
@@ -41,6 +42,22 @@ TOOLS = [
      "description": "Собрать реальные сигналы об аудитории и болях: топ-посты по "
                     "вовлечённости из reports/, боли из комментариев/лидов, экспертные "
                     "темы профиля. Используй ПЕРЕД тем как предлагать темы воркбука.",
+     "input_schema": {"type": "object", "properties": {}}},
+    {"name": "get_ig_posts_data",
+     "description": "Получить Instagram посты из Supabase за последние N дней (reach, likes, comments)",
+     "input_schema": {"type": "object", "properties": {
+         "days": {"type": "integer", "default": 30}}}},
+    {"name": "get_telegram_leads_data",
+     "description": "Получить Telegram лидов из Supabase (status: new/warm/hot/converted/inactive)",
+     "input_schema": {"type": "object", "properties": {
+         "status": {"type": "string", "default": "new"},
+         "days": {"type": "integer", "default": 7}}}},
+    {"name": "get_purchases_data",
+     "description": "Получить покупки из Supabase (сумма, способ платежа, дата)",
+     "input_schema": {"type": "object", "properties": {
+         "days": {"type": "integer", "default": 30}}}},
+    {"name": "check_supabase_access",
+     "description": "Проверить статус доступа к Supabase (можно ли читать/писать)",
      "input_schema": {"type": "object", "properties": {}}},
 ] + core_tools(
     "Прочитать продуктовые материалы, аналитику или черновики",
@@ -120,6 +137,14 @@ def analyze_audience() -> str:
 def handle(name, inp):
     if name == "analyze_audience":
         return analyze_audience()
+    if name == "get_ig_posts_data":
+        return get_ig_posts_data(inp.get("days", 30))
+    if name == "get_telegram_leads_data":
+        return get_telegram_leads_data(inp.get("status"), inp.get("days", 7))
+    if name == "get_purchases_data":
+        return get_purchases_data(inp.get("days", 30))
+    if name == "check_supabase_access":
+        return check_supabase_access()
     res = core_handle(name, inp, list_default="products")
     return res if res is not None else f"Неизвестный инструмент: {name}"
 

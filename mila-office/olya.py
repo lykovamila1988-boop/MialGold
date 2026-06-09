@@ -1,6 +1,6 @@
 """Оля — Исследователь трендов. python olya.py"""
 from base import *
-from shared_tools import get_weekly_analytics
+from shared_tools import get_weekly_analytics, get_ig_posts_data, get_telegram_leads_data, check_supabase_access
 import memory
 # memory нужна для monitor_competitors (читает competitors.json) и управления конкурентами.
 # Импортируем её ЯВНО так как используем add_competitor, remove_competitor.
@@ -60,6 +60,15 @@ TOOLS = [
     {"name": "get_weekly_analytics", "description": "Получить еженедельную аналитику Instagram (охват, лайки, комментарии)",
      "input_schema": {"type": "object", "properties": {
          "days": {"type": "integer", "description": "Количество дней (по умолч. 7)", "default": 7}}}},
+    {"name": "get_ig_posts_data", "description": "Получить посты из Supabase (детальные метрики: reach, likes, comments)",
+     "input_schema": {"type": "object", "properties": {
+         "days": {"type": "integer", "default": 30}}}},
+    {"name": "get_telegram_leads_data", "description": "Получить Telegram лидов из Supabase (статус, писали ли ХОЧУ)",
+     "input_schema": {"type": "object", "properties": {
+         "status": {"type": "string", "default": "new"},
+         "days": {"type": "integer", "default": 7}}}},
+    {"name": "check_supabase_access", "description": "Проверить статус доступа к Supabase",
+     "input_schema": {"type": "object", "properties": {}}},
 ] + core_tools("Читать аналитику и предыдущие отчёты",
                "Сохранить исследование и идеи",
                "Показать файлы аналитики",
@@ -211,6 +220,9 @@ def handle(name, inp):
     if name == "remove_competitor": return remove_competitor(inp.get("handle", ""))
     if name == "list_competitors": return list_competitors()
     if name == "get_weekly_analytics": return get_weekly_analytics(inp.get("days", 7))
+    if name == "get_ig_posts_data": return get_ig_posts_data(inp.get("days", 30))
+    if name == "get_telegram_leads_data": return get_telegram_leads_data(inp.get("status"), inp.get("days", 7))
+    if name == "check_supabase_access": return check_supabase_access()
     res = core_handle(name, inp, list_default="05-analytics")
     return res if res is not None else f"Неизвестный инструмент: {name}"
 
