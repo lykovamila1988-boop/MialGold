@@ -557,7 +557,10 @@ def get_chain_stats(hours: int = 24) -> Dict[str, Any]:
     with _chains_lock:
         for chain_id, chain in _chains.items():
             created_at = datetime.fromisoformat(chain["created_at"].replace("Z", "+00:00"))
-            if created_at < cutoff_time:
+            cutoff_aware = cutoff_time.replace(tzinfo=None) if cutoff_time.tzinfo is None else cutoff_time
+            created_naive = created_at.replace(tzinfo=None) if created_at.tzinfo else created_at
+
+            if created_naive < cutoff_aware:
                 continue
 
             status = chain.get("status", "unknown")
@@ -567,7 +570,8 @@ def get_chain_stats(hours: int = 24) -> Dict[str, Any]:
             # Вычисляем длительность
             if chain.get("completed_at"):
                 completed_at = datetime.fromisoformat(chain["completed_at"].replace("Z", "+00:00"))
-                duration = (completed_at - created_at).total_seconds()
+                completed_naive = completed_at.replace(tzinfo=None) if completed_at.tzinfo else completed_at
+                duration = (completed_naive - created_naive).total_seconds()
                 total_duration += duration
                 chain_count += 1
 

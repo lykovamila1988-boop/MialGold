@@ -11,6 +11,9 @@ import memory
 import json
 from datetime import datetime
 
+# TELEGRAM_CHANNEL_ID из .env используется как default для всех функций
+# Если агент не передал chat_id — автоматически публикуется в основной канал
+
 SYSTEM = """Ты — Тёма, менеджер Telegram-канала Людмилы Лыковой (@liudmyla.lykova).
 
 КАНАЛ:
@@ -63,8 +66,8 @@ def send_to_queue(text, channel_id="", chat_id="", chain_id="", content_type="")
 
     Args:
         text: текст сообщения
-        channel_id: ID канала (если публикация в канал)
-        chat_id: ID чата / пользователя (если DM)
+        channel_id: ID канала (default: TELEGRAM_CHANNEL_ID из .env)
+        chat_id: ID чата / пользователя (если DM, то имеет приоритет над channel_id)
         chain_id: ID цепочки постов (для кросс-постинга с Instagram). Если пусто — создаём новый
         content_type: тип контента (инсайт, кейс, практика, оффер, диагностика)
 
@@ -77,9 +80,13 @@ def send_to_queue(text, channel_id="", chat_id="", chain_id="", content_type="")
         import uuid
         chain_id = f"tg_{str(uuid.uuid4())[:8]}"
 
+    # Использовать channel_id или TELEGRAM_CHANNEL_ID из .env как default
+    final_channel_id = channel_id or TELEGRAM_CHANNEL_ID
+    final_chat_id = chat_id or final_channel_id
+
     metadata = {
-        "channel_id": channel_id or chat_id,
-        "chat_id": chat_id,
+        "channel_id": final_channel_id,
+        "chat_id": final_chat_id,
         "chain_id": chain_id,
         "source": "telegram",
         "content_type": content_type or "general",

@@ -1,0 +1,312 @@
+╔════════════════════════════════════════════════════════════════════════════╗
+║                   CHAIN_RETRY.PY - QUICK REFERENCE CARD                    ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+IMPORT
+─────────────────────────────────────────────────────────────────────────────
+from chain_retry import (
+    create_chain, get_chain, update_node_status,
+    retry_chain, escalate_chain, split_chain, merge_results,
+    complete_chain, cancel_chain, get_chain_history, get_chain_stats
+)
+
+CORE API
+─────────────────────────────────────────────────────────────────────────────
+
+1. CREATE CHAIN
+   ──────────────
+   chain = create_chain(chain_id, agents, context=None)
+
+   Example:
+   >>> chain = create_chain("doc_001", ["victoria", "alina", "dima"],
+   ...                      context={"document": "post.md"})
+
+2. UPDATE NODE STATUS
+   ────────────────────
+   update_node_status(chain_id, agent_key, status, reply=None, error=None)
+
+   Status: "running" | "success" | "failed" | "skipped"
+
+   Example:
+   >>> update_node_status("doc_001", "victoria", "running")
+   >>> update_node_status("doc_001", "victoria", "success", reply="Edited!")
+
+3. RETRY CHAIN
+   ─────────────
+   result = retry_chain(chain_id, failed_agent, reason, max_retries=3)
+
+   Reason: "agent_error" | "timeout" | "api_failure" | "validation_failed" |
+           "manual_retry" | "task_complexity" | "escalation"
+
+   Returns: Chain object if retrying, None if max retries exceeded
+
+   Example:
+   >>> result = retry_chain("doc_001", "alina", "timeout", max_retries=2)
+   >>> if result:
+   ...     print(f"Retry {result['retry_count']}/2")
+
+4. ESCALATE CHAIN
+   ────────────────
+   result = escalate_chain(chain_id, new_agent, reason="")
+
+   Example:
+   >>> escalate_chain("doc_001", "rita", reason="Too complex")
+
+5. SPLIT CHAIN (Parallel)
+   ────────────────────────
+   result = split_chain(chain_id, to_agents, context=None)
+
+   Example:
+   >>> split_chain("report_001", ["olya", "rita", "manager"])
+
+6. MERGE RESULTS
+   ──────────────
+   result = merge_results(chain_id, results, merge_strategy="union")
+
+   Strategy: "union" | "consensus" | "first_success"
+
+   Results format:
+   [
+       {"agent_key": "olya", "result": "...", "confidence": 0.95, "error": None},
+       {"agent_key": "rita", "result": "...", "confidence": 0.70, "error": None},
+   ]
+
+   Example:
+   >>> merge_results("report_001", results, merge_strategy="consensus")
+
+7. COMPLETE CHAIN
+   ────────────────
+   complete_chain(chain_id, final_result=None)
+
+   Example:
+   >>> complete_chain("doc_001", final_result="Ready to publish")
+
+8. CANCEL CHAIN
+   ──────────────
+   cancel_chain(chain_id, reason="")
+
+   Example:
+   >>> cancel_chain("doc_001", reason="User cancelled")
+
+QUERY API
+─────────────────────────────────────────────────────────────────────────────
+
+GET CHAIN STATE
+   ───────────────
+   chain = get_chain(chain_id)
+
+GET HISTORY
+   ──────────
+   history = get_chain_history(chain_id)
+   for event in history:
+       print(f"{event['timestamp']}: {event['event_type']}")
+
+GET STATS
+   ────────
+   stats = get_chain_stats(hours=24)
+   print(stats["total_chains"])
+   print(stats["by_status"])
+
+GET ALL CHAINS
+   ─────────────
+   all_chains = get_all_chains()
+
+MAINTENANCE
+─────────────────────────────────────────────────────────────────────────────
+
+CLEAR OLD CHAINS
+   ───────────────
+   clear_old_chains(hours=24)  # Delete old chains from memory
+
+EXPORT TO JSON
+   ─────────────
+   path = export_chain_to_json(chain_id, filepath=None)
+   # Saves to logs/chains/{chain_id}.json if filepath=None
+
+LOAD FROM JSON
+   ─────────────
+   chain = load_chain_from_json(filepath)
+
+INTEGRATION PATTERNS
+─────────────────────────────────────────────────────────────────────────────
+
+PATTERN 1: Sequential Chain
+──────────────────────────────
+from chain_retry_integration import execute_chain_sequential, ChainExecutionConfig
+
+config = ChainExecutionConfig(
+    chain_id="doc_001",
+    agents=["victoria", "alina", "dima"],
+    max_retries=3,
+    context={"document": "post.md"}
+)
+
+result = execute_chain_sequential(config, run_agent)
+print(result["status"])  # "success" | "failed" | "escalated"
+
+PATTERN 2: Parallel + Merge
+────────────────────────────
+from chain_retry_integration import execute_chain_parallel
+
+config = ChainExecutionConfig(
+    chain_id="report_001",
+    agents=["olya", "rita", "manager"]
+)
+
+result = execute_chain_parallel(config, run_agent, merge_strategy="consensus")
+print(result["merged_result"])
+
+PATTERN 3: Error Handler
+────────────────────────
+from chain_retry_integration import ChainErrorHandler
+
+handler = ChainErrorHandler("chain_001", escalate_to="manager")
+
+try:
+    response = run_agent(agent_key, context)
+except Exception as e:
+    should_retry = handler.handle(agent_key, e, context={"endpoint": "/api"})
+    if not should_retry:
+        print("Will escalate")
+
+PATTERN 4: Monitoring
+──────────────────────
+from chain_retry_integration import ChainMonitor
+
+monitor = ChainMonitor(cleanup_hours=24)
+monitor.maybe_cleanup()
+status = monitor.get_status()
+print(f"Active chains: {status['total']}")
+
+COMMON WORKFLOWS
+─────────────────────────────────────────────────────────────────────────────
+
+WORKFLOW 1: Simple Sequential
+───────────────────────────────
+chain = create_chain("task_001", ["agent1", "agent2"])
+
+# Agent 1
+try:
+    update_node_status("task_001", "agent1", "running")
+    result = run_agent("agent1", context)
+    update_node_status("task_001", "agent1", "success", reply=result)
+except Exception as e:
+    update_node_status("task_001", "agent1", "failed", error=str(e))
+    retry_chain("task_001", "agent1", "agent_error")
+
+# Agent 2 (similar)
+
+complete_chain("task_001")
+
+WORKFLOW 2: Retry with Escalation
+──────────────────────────────────
+result = retry_chain("task_001", "agent1", "timeout", max_retries=2)
+
+if result is None:
+    # Max retries exceeded
+    escalate_chain("task_001", "agent2", reason="Failed after 2 retries")
+
+WORKFLOW 3: Parallel Analysis
+──────────────────────────────
+split_chain("report_001", ["analyst1", "analyst2", "analyst3"])
+
+results = []
+for agent in ["analyst1", "analyst2", "analyst3"]:
+    try:
+        r = run_agent(agent, context)
+        results.append({"agent_key": agent, "result": r, "confidence": 0.9})
+    except Exception as e:
+        results.append({"agent_key": agent, "result": None, "error": str(e)})
+
+merge_results("report_001", results, merge_strategy="consensus")
+complete_chain("report_001")
+
+ENUMS & CONSTANTS
+─────────────────────────────────────────────────────────────────────────────
+
+Chain Statuses:
+  "running"    - Chain is executing
+  "success"    - All agents completed
+  "failed"     - Exceeded retry limit
+  "retrying"   - Currently retrying
+  "escalated"  - Switched to different agent
+  "split"      - Running in parallel
+  "merged"     - Results combined
+  "cancelled"  - User stopped
+
+Retry Reasons:
+  "agent_error"        - Agent crashed
+  "timeout"            - API timed out
+  "api_failure"        - External API error
+  "validation_failed"  - Output validation failed
+  "manual_retry"       - User requested retry
+  "task_complexity"    - Task too complex
+  "escalation"         - Escalating to different agent
+
+Node Statuses:
+  "pending"   - Waiting to execute
+  "running"   - Currently executing
+  "success"   - Completed successfully
+  "failed"    - Hit an error
+  "skipped"   - Skipped (e.g., after escalation)
+
+Merge Strategies:
+  "union"         - Collect all successful results → list
+  "consensus"     - Pick highest confidence → single result
+  "first_success" - Use first non-error result → single result
+
+DEBUG & LOGGING
+─────────────────────────────────────────────────────────────────────────────
+
+LOG FILES:
+  logs/chain_events.jsonl      - All events (newline-delimited JSON)
+  logs/chain_retries.jsonl     - Retry attempts only
+  logs/chain_retry.log         - Text log (INFO/ERROR)
+  logs/chains/                 - Exported chain snapshots
+
+VIEW HISTORY:
+  history = get_chain_history("chain_001")
+  for event in history:
+      print(f"{event['timestamp']}: {event['event_type']}")
+
+VIEW STATS:
+  stats = get_chain_stats(hours=24)
+  print(f"Total: {stats['total_chains']}")
+  print(f"Status: {stats['by_status']}")
+  print(f"Avg duration: {stats['avg_duration_seconds']}s")
+
+TROUBLESHOOTING
+─────────────────────────────────────────────────────────────────────────────
+
+Q: Chain not found?
+A: create_chain("chain_id", agents) first
+
+Q: No retries?
+A: Check reason is valid: "timeout", "api_failure", "agent_error", etc.
+
+Q: Max retries exceeded immediately?
+A: max_retries counts total attempts (retry_count), not retry attempts
+
+Q: High memory?
+A: Call clear_old_chains(hours=24) periodically
+
+Q: Merge not working?
+A: Ensure results format: [{"agent_key": "...", "result": "..."}, ...]
+
+REFERENCES
+─────────────────────────────────────────────────────────────────────────────
+
+Files:
+  chain_retry.py              - Core module (700+ lines)
+  chain_retry_integration.py  - Patterns & helpers (400+ lines)
+  test_chain_retry.py         - Tests (29 tests, all passing)
+
+Docs:
+  CHAIN_RETRY_README.md       - Overview & features
+  CHAIN_RETRY_GUIDE.md        - Full API reference (500+ lines)
+  CHAIN_RETRY_SUMMARY.txt     - Implementation summary
+
+╔════════════════════════════════════════════════════════════════════════════╗
+║  Quick Start: 1) create_chain() 2) update_node_status() 3) retry/escalate  ║
+║              4) complete_chain(). See CHAIN_RETRY_GUIDE.md for full API.   ║
+╚════════════════════════════════════════════════════════════════════════════╝

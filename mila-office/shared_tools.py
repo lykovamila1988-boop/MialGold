@@ -7,7 +7,7 @@ Shared tools для агентов — единственный источник
 import json
 import os
 import requests
-from base import GUMROAD_TOKEN, TELEGRAM_TOKEN, log
+from base import GUMROAD_TOKEN, TELEGRAM_TOKEN, TELEGRAM_CHANNEL_ID, TELEGRAM_ADMIN_CHAT_ID, log
 
 
 def gumroad_sales(limit=10):
@@ -23,19 +23,31 @@ def gumroad_sales(limit=10):
         return f"Gumroad недоступен: {e}"
 
 
-def telegram_send(chat_id, text, confirm=True):
-    """Отправить сообщение в Telegram (общая функция для Tyoma)."""
+def telegram_send(chat_id="", text="", confirm=True):
+    """Отправить сообщение в Telegram (общая функция для Tyoma).
+
+    Args:
+        chat_id: ID канала/чата (default: TELEGRAM_CHANNEL_ID из .env)
+        text: текст сообщения
+        confirm: если True — показать черновик перед публикацией
+    """
     if not TELEGRAM_TOKEN:
         return "⚠️ Нет TELEGRAM_BOT_TOKEN в .env"
+
+    # Если chat_id не передан, использовать канал из .env
+    final_chat_id = chat_id or TELEGRAM_CHANNEL_ID
+    if not final_chat_id:
+        return "⚠️ Нет chat_id и TELEGRAM_CHANNEL_ID не установлен в .env"
+
     if confirm:
-        return f"📋 ЧЕРНОВИК (не опубликовано):\n\n{text}\n\nЧтобы опубликовать — скажи 'подтверди публикацию'"
+        return f"📋 ЧЕРНОВИК (не опубликовано в {final_chat_id}):\n\n{text}\n\nЧтобы опубликовать — скажи 'подтверди публикацию'"
     try:
         r = requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"}, timeout=10)
+            json={"chat_id": final_chat_id, "text": text, "parse_mode": "HTML"}, timeout=10)
         data = r.json()
         if data.get("ok"):
-            log("telegram", f"Sent to {chat_id}: {text[:50]}")
-            return f"✓ Опубликовано! Message ID: {data['result']['message_id']}"
+            log("telegram", f"Sent to {final_chat_id}: {text[:50]}")
+            return f"✓ Опубликовано в канал {final_chat_id}! Message ID: {data['result']['message_id']}"
         return f"Ошибка: {data.get('description')}"
     except Exception as e:
         return f"Ошибка: {e}"
@@ -64,17 +76,27 @@ def telegram_get_updates():
         return f"Ошибка: {e}"
 
 
-def telegram_channel_stats(chat_id):
-    """Получить статистику Telegram канала (для Tyoma)."""
+def telegram_channel_stats(chat_id=""):
+    """Получить статистику Telegram канала (для Tyoma).
+
+    Args:
+        chat_id: ID канала для статистики (default: TELEGRAM_CHANNEL_ID из .env)
+    """
     if not TELEGRAM_TOKEN:
-        return "⚠️ Нет TELEGRAM_BOT_TOKEN"
+        return "⚠️ Нет TELEGRAM_BOT_TOKEN в .env"
+
+    # Если chat_id не передан, использовать канал из .env
+    final_chat_id = chat_id or TELEGRAM_CHANNEL_ID
+    if not final_chat_id:
+        return "⚠️ Нет chat_id и TELEGRAM_CHANNEL_ID не установлен в .env"
+
     try:
         r = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getChatMemberCount",
-            params={"chat_id": chat_id}, timeout=10)
+            params={"chat_id": final_chat_id}, timeout=10)
         data = r.json()
         if data.get("ok"):
             return json.dumps({
-                "chat_id": chat_id,
+                "chat_id": final_chat_id,
                 "member_count": data.get("result", 0)
             }, ensure_ascii=False, indent=2)
         return f"Ошибка: {data.get('description')}"

@@ -45,6 +45,8 @@ if tools_env.exists():
 ANTHROPIC_KEY   = os.getenv("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_KEY")
 GEMINI_KEY      = os.getenv("GEMINI_KEY") or os.getenv("GOOGLE_API_KEY")
 TELEGRAM_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_API")
+TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")  # ID Telegram канала для публикаций
+TELEGRAM_ADMIN_CHAT_ID = os.getenv("TELEGRAM_ADMIN_CHAT_ID")  # Личный чат Людмилы для уведомлений
 GUMROAD_TOKEN   = os.getenv("GUMROAD_ACCESS_TOKEN") or os.getenv("GUMROAD_TOKEN")
 GAMMA_API_KEY   = os.getenv("GAMMA_API_KEY")
 GAMMA_THEME_ID  = os.getenv("GAMMA_THEME_ID")
@@ -117,6 +119,8 @@ _CONFIG = {
     "ANTHROPIC_API_KEY":    ANTHROPIC_KEY,
     "GEMINI_KEY":           GEMINI_KEY,
     "TELEGRAM_BOT_TOKEN":   TELEGRAM_TOKEN,
+    "TELEGRAM_CHANNEL_ID":  TELEGRAM_CHANNEL_ID,
+    "TELEGRAM_ADMIN_CHAT_ID": TELEGRAM_ADMIN_CHAT_ID,
     "GUMROAD_ACCESS_TOKEN": GUMROAD_TOKEN,
     "GAMMA_API_KEY":       GAMMA_API_KEY,
     "IG_ACCESS_TOKEN":      INSTAGRAM_TOKEN,
