@@ -1,6 +1,7 @@
 """Дима — Финансовый агент. python dima.py"""
 from base import *
 from shared_tools import gumroad_sales as get_gumroad_sales, calc_ltv_and_mrr
+import memory
 
 SYSTEM = """Ты — Дима, финансовый агент Людмилы Лыковой. Считаешь деньги, строишь прогнозы, отслеживаешь рост бизнеса.
 
@@ -38,6 +39,19 @@ SYSTEM = """Ты — Дима, финансовый агент Людмилы Л
 
 СТИЛЬ: Конкретный, с цифрами. Говоришь правду даже если она неудобная."""
 
+def automation_stats(days: int = 7) -> str:
+    """Получить статистику успешности P1→P2→P3 (Marina→Victoria→Vasya).
+    Показывает сколько постов дошло до каждого этапа и где теряются."""
+    try:
+        stats = memory.get_automation_stats(days=days)
+        if stats.get("status") == "no_data":
+            return "Нет данных по автоматизации. Запусти pipeline.py чтобы собрать статистику."
+
+        import json
+        return json.dumps(stats, ensure_ascii=False, indent=2)
+    except Exception as e:
+        return f"Ошибка при получении статистики: {e}"
+
 TOOLS = core_tools("Читать финансовые данные",
                    "Сохранить финансовый отчёт",
                    "Показать финансовые файлы",
@@ -46,11 +60,16 @@ TOOLS = core_tools("Читать финансовые данные",
      "input_schema": {"type": "object", "properties": {}}},
     {"name": "calc_ltv_and_mrr", "description": "Рассчитать LTV (lifetime value) и MRR (monthly recurring revenue) + repeat rate",
      "input_schema": {"type": "object", "properties": {}}},
+    {"name": "automation_stats", "description": "Статистика успешности P1→P2→P3 (какой % постов дошёл до публикации)",
+     "input_schema": {"type": "object", "properties": {
+         "days": {"type": "integer", "description": "Количество дней для анализа", "default": 7}
+     }}},
 ]
 
 def handle(name, inp):
     if name == "gumroad_sales": return get_gumroad_sales(limit=20)
     if name == "calc_ltv_and_mrr": return calc_ltv_and_mrr()
+    if name == "automation_stats": return automation_stats(inp.get("days", 7))
     res = core_handle(name, inp, list_default="05-analytics")
     return res if res is not None else f"Неизвестный инструмент: {name}"
 
@@ -58,6 +77,7 @@ QUICK = {
     "/доход":    "Посчитай мой доход за этот месяц из всех источников",
     "/прогноз":  "При текущем темпе — сколько я заработаю за следующие 3 месяца?",
     "/gumroad":  "Покажи продажи практикума с Gumroad",
+    "/pipeline": "Какой % постов дошёл до публикации? Где пробка в P1→P2→P3?",
     "/цели":     "Сравни текущие результаты с целями бизнеса. Что нужно изменить?",
     "/отчёт":    "Создай полный финансовый отчёт за текущий месяц и сохрани",
 }

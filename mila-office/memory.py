@@ -925,6 +925,54 @@ def read_competitors() -> dict:
     return _read_json(COMPETITORS, {"updated": None, "accounts": []})
 
 
+def write_competitors(data: dict) -> dict:
+    """Сохранить данные о конкурентах в COMPETITORS файл."""
+    data["updated"] = _now()
+    with _FileLock():
+        _write_json(COMPETITORS, data)
+    log_event("competitors:updated", {"count": len(data.get("accounts", []))})
+    return data
+
+
+def add_competitor(handle: str, why_watch: str, notes: str = "") -> dict:
+    """Добавить конкурента в список мониторинга."""
+    competitors = read_competitors()
+    # Избегаем дублей
+    if any(acc.get("handle") == handle for acc in competitors.get("accounts", [])):
+        return {"status": "exists", "message": f"{handle} уже в списке"}
+
+    competitors["accounts"].append({
+        "handle": handle,
+        "why_watch": why_watch,
+        "notes": notes,
+        "added_at": _now(),
+        "added_by": "olya"
+    })
+    return write_competitors(competitors)
+
+
+def remove_competitor(handle: str) -> dict:
+    """Удалить конкурента из списка мониторинга."""
+    competitors = read_competitors()
+    before = len(competitors.get("accounts", []))
+    competitors["accounts"] = [
+        acc for acc in competitors.get("accounts", [])
+        if acc.get("handle") != handle
+    ]
+    after = len(competitors["accounts"])
+
+    if after == before:
+        return {"status": "not_found", "message": f"{handle} не найден в списке"}
+
+    return write_competitors(competitors)
+
+
+def list_competitors() -> list:
+    """Получить список всех конкурентов для мониторинга."""
+    competitors = read_competitors()
+    return competitors.get("accounts", [])
+
+
 def published_count() -> int:
     """Сколько постов зарегистрировано в реестре публикаций (для расчёта фазы)."""
     rows = _read_json(PUBLISHED, [])
@@ -1278,6 +1326,138 @@ def get_posts_pending_approval() -> list:
     """Получить все посты ждущие одобрения Victoria."""
     posts = _read_json(POST_APPROVALS, {})
     return [p for p in posts.values() if p.get("status") not in ("approved", "published")]
+
+
+# ─── AUTOMATION MONITORING: логирование P1→P2→P3 (Marina→Victoria→Vasya) ──────────────
+# Отслеживаем сколько постов дошло до каждого этапа. Используется Dima для анализа успешности.
+
+AUTOMATION_RUNS = (
+    Path(os.getenv("MILA_FOLDER", r"E:\MILA GOLD")) / "MILA-BUSINESS" / "05-analytics" / "automation_runs.jsonl"
+)
+
+def log_automation_run(phase: str, agent: str, action: str, status: str, details: dict = None) -> dict:
+    """
+    Логировать результат P1/P2/P3 запуска.
+
+    phase: "P1_create", "P2_review", "P3_publish"
+    agent: "marina", "victoria", "vasya"
+    action: "write_posts", "approve_post", "instagram_publish"
+    status: "success", "failed", "pending"
+    details: {"post_id": "...", "error": "...", "media_id": "...", ...}
+    """
+    run = {
+        "timestamp": _now(),
+        "phase": phase,
+        "agent": agent,
+        "action": action,
+        "status": status,
+        "details": details or {}
+    }
+
+    AUTOMATION_RUNS.parent.mkdir(parents=True, exist_ok=True)
+    with _FileLock():
+        try:
+            with open(AUTOMATION_RUNS, "a", encoding="utf-8") as f:
+                json.dump(run, f, ensure_ascii=False)
+                f.write("\n")
+        except Exception as e:
+            log_event("automation_runs:error", {"error": str(e)})
+            return {"ok": False, "error": str(e)}
+
+    log_event(f"automation:{phase}:{status}", {
+        "agent": agent,
+        "action": action,
+        "post_id": details.get("post_id") if details else None
+    })
+    return run
+
+
+def get_automation_stats(days: int = 7) -> dict:
+    """
+    Получить статистику успешности автоматизации P1→P2→P3 за N дней.
+    Возвращает completion_rate (какой % постов дошёл до публикации).
+    """
+    if not AUTOMATION_RUNS.exists():
+        return {
+            "status": "no_data",
+            "total": 0,
+            "by_phase": {"P1_create": 0, "P2_review": 0, "P3_publish": 0},
+            "by_status": {"success": 0, "failed": 0, "pending": 0},
+            "completion_rate": "0%",
+            "success_rate": "0%",
+            "bottleneck": "Нет данных"
+        }
+
+    runs = []
+    cutoff = time.time() - (days * 86400)
+
+    try:
+        with open(AUTOMATION_RUNS, "r", encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                try:
+                    run = json.loads(line)
+                    # Проверяем timestamp
+                    ts_str = run.get("timestamp", "")
+                    if ts_str:
+                        try:
+                            ts = time.fromisoformat(ts_str.replace('Z', '+00:00')).timestamp()
+                            if ts > cutoff:
+                                runs.append(run)
+                        except:
+                            pass
+                except json.JSONDecodeError:
+                    pass
+    except Exception:
+        pass
+
+    # Вычислить статистику
+    by_phase = {"P1_create": 0, "P2_review": 0, "P3_publish": 0}
+    by_status = {"success": 0, "failed": 0, "pending": 0}
+
+    for run in runs:
+        phase = run.get("phase", "unknown")
+        status = run.get("status", "unknown")
+
+        if phase in by_phase:
+            by_phase[phase] += 1
+        if status in by_status:
+            by_status[status] += 1
+
+    # Вычислить completion_rate: сколько постов дошло до P3 от P1
+    p1_count = by_phase.get("P1_create", 0)
+    p3_count = by_phase.get("P3_publish", 0)
+    completion_rate = 0
+    if p1_count > 0:
+        completion_rate = round((p3_count / p1_count) * 100, 1)
+
+    # Success rate: сколько успешных запусков
+    success_count = by_status.get("success", 0)
+    total_runs = len(runs) if runs else 0
+    success_rate = 0
+    if total_runs > 0:
+        success_rate = round((success_count / total_runs) * 100, 1)
+
+    # Найти bottleneck
+    bottleneck = "Процесс работает нормально ✓"
+    if p1_count == 0:
+        bottleneck = "Marina не создаёт посты (P1)"
+    elif by_phase.get("P2_review", 0) < p1_count * 0.8:
+        bottleneck = "Victoria не редактирует (P2) — пробка в редактуре"
+    elif p3_count < by_phase.get("P2_review", 0) * 0.8:
+        bottleneck = "Vasya не публикует (P3) — пробка в публикации"
+
+    return {
+        "status": "ok",
+        "period": f"последние {days} дней",
+        "total_runs": total_runs,
+        "by_phase": by_phase,
+        "by_status": by_status,
+        "completion_rate": f"{completion_rate}%",
+        "success_rate": f"{success_rate}%",
+        "bottleneck": bottleneck
+    }
 
 
 # ─── UNIFIED MESSAGE QUEUE: асинхронная отправка сообщений (Instagram comments, Telegram, Threads) ──────────

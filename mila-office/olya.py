@@ -1,9 +1,9 @@
 """Оля — Исследователь трендов. python olya.py"""
 from base import *
 from shared_tools import get_weekly_analytics
-# memory нужна только для monitor_competitors (читает competitors.json). Импортируем
-# её ЛЕНИВО внутри функции (как rita.py), чтобы сбой/отсутствие memory.py не ронял
-# всего агента — web_search/тренды/хуки работают без памяти.
+import memory
+# memory нужна для monitor_competitors (читает competitors.json) и управления конкурентами.
+# Импортируем её ЯВНО так как используем add_competitor, remove_competitor.
 
 SYSTEM = """Ты — Оля, исследователь трендов и контент-стратег. Мониторишь что вирусится в нише психологии отношений.
 
@@ -46,6 +46,17 @@ TOOLS = [
                     "на рынке прямо сейчас, и извлечь паттерн (а не копировать).",
      "input_schema": {"type": "object", "properties": {
          "limit": {"type": "integer", "description": "сколько аккаунтов проверить (по умолч. 8)"}}}},
+    {"name": "add_competitor", "description": "Добавить аккаунт в список мониторинга",
+     "input_schema": {"type": "object", "properties": {
+         "handle": {"type": "string", "description": "Instagram ник (без @)"},
+         "why_watch": {"type": "string", "description": "Почему смотрим (пишет про же темы, популярна в нише и т.д.)"}
+     }, "required": ["handle", "why_watch"]}},
+    {"name": "remove_competitor", "description": "Удалить аккаунт из списка мониторинга",
+     "input_schema": {"type": "object", "properties": {
+         "handle": {"type": "string", "description": "Instagram ник (без @)"}
+     }, "required": ["handle"]}},
+    {"name": "list_competitors", "description": "Показать список всех мониторируемых конкурентов",
+     "input_schema": {"type": "object", "properties": {}}},
     {"name": "get_weekly_analytics", "description": "Получить еженедельную аналитику Instagram (охват, лайки, комментарии)",
      "input_schema": {"type": "object", "properties": {
          "days": {"type": "integer", "description": "Количество дней (по умолч. 7)", "default": 7}}}},
@@ -119,12 +130,53 @@ def web_search(query: str) -> str:
         return (f"Поиск недоступен: {e}. Отвечаю на основе знаний — "
                 f"помечай такие выводы как непроверенные.")
 
+def add_competitor(handle: str, why_watch: str) -> str:
+    """Добавить аккаунт в список конкурентов для мониторинга."""
+    try:
+        result = memory.add_competitor(handle, why_watch)
+        if result.get("status") == "exists":
+            return f"⚠️ {handle} уже в списке мониторинга"
+        return f"✓ {handle} добавлен в список конкурентов"
+    except Exception as e:
+        return f"Ошибка при добавлении: {e}"
+
+
+def remove_competitor(handle: str) -> str:
+    """Удалить аккаунт из списка мониторинга."""
+    try:
+        result = memory.remove_competitor(handle)
+        if result.get("status") == "not_found":
+            return f"⚠️ {handle} не найден в списке"
+        return f"✓ {handle} удалён из списка конкурентов"
+    except Exception as e:
+        return f"Ошибка при удалении: {e}"
+
+
+def list_competitors() -> str:
+    """Показать список всех конкурентов."""
+    try:
+        competitors = memory.list_competitors()
+        if not competitors:
+            return "Список конкурентов пуст. Добавь аккаунты через add_competitor"
+
+        result = ["📊 Мониторируемые конкуренты:\n"]
+        for i, acc in enumerate(competitors, 1):
+            handle = acc.get("handle", "?")
+            why = acc.get("why_watch", "")
+            result.append(f"{i}. @{handle}")
+            if why:
+                result.append(f"   Почему: {why}")
+
+        return "\n".join(result)
+    except Exception as e:
+        return f"Ошибка при получении списка: {e}"
+
+
 def monitor_competitors(limit: int = 8) -> str:
     """Читает memory/competitors.json и по каждому аккаунту ищет свежие
     упоминания/контент в вебе. Instagram API чужую аналитику не даёт — поэтому
     смотрим публичный веб. Возвращает сырьё для анализа паттернов (хуки/темы)."""
     try:
-        import memory
         data = memory.read_competitors()
     except Exception:
         return ("Память (memory.py) недоступна — список конкурентов не прочитать. "
@@ -155,6 +207,9 @@ def monitor_competitors(limit: int = 8) -> str:
 def handle(name, inp):
     if name == "web_search": return web_search(inp["query"])
     if name == "monitor_competitors": return monitor_competitors(inp.get("limit", 8))
+    if name == "add_competitor": return add_competitor(inp.get("handle", ""), inp.get("why_watch", ""))
+    if name == "remove_competitor": return remove_competitor(inp.get("handle", ""))
+    if name == "list_competitors": return list_competitors()
     if name == "get_weekly_analytics": return get_weekly_analytics(inp.get("days", 7))
     res = core_handle(name, inp, list_default="05-analytics")
     return res if res is not None else f"Неизвестный инструмент: {name}"
