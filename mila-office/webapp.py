@@ -51,6 +51,7 @@ import session_manager
 import webapp_utils
 import document_manager
 import upload_handler
+import batch_upload_handler
 
 # ─── Логирование ─────────────────────────────────────────
 # Полный traceback пишем в файл, клиенту отдаём безопасное сообщение.
@@ -434,6 +435,9 @@ app.config.update(
     SESSION_COOKIE_SAMESITE="Lax",
     SESSION_COOKIE_SECURE=os.getenv("MILA_HTTPS", "").lower() in ("1", "true", "yes"),
 )
+
+# ─── Регистрация batch PDF upload routes ──────────────────
+batch_upload_handler.register_batch_upload_routes(app)
 
 
 @app.after_request
@@ -1809,6 +1813,21 @@ def dashboard_page():
 @app.get("/operator")
 def operator_page():
     return Response(OPERATOR_HTML, mimetype="text/html")
+
+
+@app.get("/batch-upload")
+def batch_upload_page():
+    """Страница для batch загрузки PDF файлов."""
+    try:
+        batch_html_path = Path(__file__).parent / "templates" / "batch_upload.html"
+        if batch_html_path.exists():
+            content = batch_html_path.read_text(encoding="utf-8")
+            return Response(content, mimetype="text/html")
+        else:
+            return "Страница batch upload не найдена", 404
+    except Exception as e:
+        logger.error(f"Error loading batch upload page: {e}")
+        return "Ошибка загрузки страницы batch upload", 500
 
 
 @app.get("/api/operator")

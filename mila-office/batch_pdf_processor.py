@@ -2,6 +2,13 @@
 """Batch PDF processor - обработка множества PDF файлов с OCR и feedback."""
 
 import sys
+# Установить UTF-8 для консоли Windows
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+except Exception:
+    pass
+
 import json
 import asyncio
 from pathlib import Path
@@ -348,7 +355,7 @@ def main():
 
     # Сохраняем результаты в JSON
     output_file = Path("pdf_processing_report.json")
-    output_file.write_text(json.dumps(report, ensure_ascii=False, indent=2))
+    output_file.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"\n✅ Отчет сохранен в {output_file}")
 
 
