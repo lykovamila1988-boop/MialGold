@@ -1,0 +1,681 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Загрузка и обработка PDF</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            max-width: 900px;
+            width: 100%;
+            padding: 40px;
+        }
+
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 28px;
+        }
+
+        .subtitle {
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 14px;
+        }
+
+        /* DRAG AND DROP ZONE */
+        .upload-zone {
+            border: 3px dashed #667eea;
+            border-radius: 10px;
+            padding: 40px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            background: #f8f9ff;
+            margin-bottom: 30px;
+        }
+
+        .upload-zone:hover {
+            border-color: #764ba2;
+            background: #f0f1ff;
+        }
+
+        .upload-zone.dragover {
+            border-color: #764ba2;
+            background: #e8d4f8;
+            transform: scale(1.02);
+        }
+
+        .upload-zone-icon {
+            font-size: 48px;
+            margin-bottom: 15px;
+        }
+
+        .upload-zone-title {
+            font-size: 18px;
+            color: #333;
+            margin-bottom: 8px;
+            font-weight: 600;
+        }
+
+        .upload-zone-subtitle {
+            color: #999;
+            font-size: 13px;
+            margin-bottom: 20px;
+        }
+
+        .upload-zone-button {
+            display: inline-block;
+            padding: 10px 24px;
+            background: #667eea;
+            color: white;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: background 0.3s;
+        }
+
+        .upload-zone-button:hover {
+            background: #764ba2;
+        }
+
+        input[type="file"] {
+            display: none;
+        }
+
+        /* FILE LIST */
+        .file-list {
+            margin-bottom: 30px;
+        }
+
+        .file-list-title {
+            font-size: 14px;
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .file-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 12px;
+            background: #f8f9fa;
+            border-radius: 8px;
+            margin-bottom: 8px;
+            border-left: 4px solid #667eea;
+        }
+
+        .file-item.processing {
+            background: #fff3cd;
+            border-left-color: #ffc107;
+        }
+
+        .file-item.done {
+            background: #d4edda;
+            border-left-color: #28a745;
+        }
+
+        .file-item.error {
+            background: #f8d7da;
+            border-left-color: #dc3545;
+        }
+
+        .file-icon {
+            font-size: 20px;
+            width: 30px;
+            text-align: center;
+        }
+
+        .file-info {
+            flex: 1;
+        }
+
+        .file-name {
+            font-weight: 500;
+            color: #333;
+            font-size: 14px;
+        }
+
+        .file-size {
+            color: #999;
+            font-size: 12px;
+        }
+
+        .file-status {
+            font-size: 12px;
+            font-weight: 500;
+            padding: 4px 8px;
+            border-radius: 4px;
+            background: #e9ecef;
+            color: #495057;
+        }
+
+        .file-status.processing {
+            background: #fff3cd;
+            color: #856404;
+        }
+
+        .file-status.done {
+            background: #d4edda;
+            color: #155724;
+        }
+
+        .file-status.error {
+            background: #f8d7da;
+            color: #721c24;
+        }
+
+        .file-remove {
+            background: none;
+            border: none;
+            color: #999;
+            cursor: pointer;
+            font-size: 20px;
+            padding: 0;
+            width: 24px;
+            height: 24px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 4px;
+            transition: all 0.2s;
+        }
+
+        .file-remove:hover {
+            background: rgba(255, 0, 0, 0.1);
+            color: #dc3545;
+        }
+
+        /* PROGRESS BAR */
+        .progress-container {
+            margin-bottom: 30px;
+            display: none;
+        }
+
+        .progress-container.show {
+            display: block;
+        }
+
+        .progress-title {
+            font-size: 14px;
+            font-weight: 600;
+            margin-bottom: 10px;
+            color: #333;
+        }
+
+        .progress-bar {
+            height: 6px;
+            background: #e9ecef;
+            border-radius: 3px;
+            overflow: hidden;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+            width: 0%;
+            transition: width 0.3s ease;
+        }
+
+        .progress-text {
+            font-size: 12px;
+            color: #666;
+            margin-top: 8px;
+        }
+
+        /* BUTTONS */
+        .button-group {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 30px;
+        }
+
+        .btn {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.3s;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .btn-primary {
+            background: #667eea;
+            color: white;
+            flex: 1;
+        }
+
+        .btn-primary:hover {
+            background: #764ba2;
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
+        }
+
+        .btn-primary:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .btn-secondary {
+            background: #f0f0f0;
+            color: #333;
+            flex: 1;
+        }
+
+        .btn-secondary:hover:not(:disabled) {
+            background: #e0e0e0;
+        }
+
+        /* RESULTS */
+        .results {
+            margin-top: 40px;
+            padding: 30px;
+            background: #f8f9fa;
+            border-radius: 10px;
+            display: none;
+        }
+
+        .results.show {
+            display: block;
+        }
+
+        .results-title {
+            font-size: 20px;
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 20px;
+        }
+
+        .results-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .result-card {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            text-align: center;
+            border-left: 4px solid #667eea;
+        }
+
+        .result-card-number {
+            font-size: 32px;
+            font-weight: 700;
+            color: #667eea;
+        }
+
+        .result-card-label {
+            font-size: 12px;
+            color: #666;
+            margin-top: 8px;
+            text-transform: uppercase;
+        }
+
+        .result-card.success {
+            border-left-color: #28a745;
+        }
+
+        .result-card.success .result-card-number {
+            color: #28a745;
+        }
+
+        .result-card.error {
+            border-left-color: #dc3545;
+        }
+
+        .result-card.error .result-card-number {
+            color: #dc3545;
+        }
+
+        /* ALERTS */
+        .alert {
+            padding: 12px 16px;
+            border-radius: 6px;
+            margin-bottom: 15px;
+            font-size: 13px;
+            display: none;
+        }
+
+        .alert.show {
+            display: block;
+        }
+
+        .alert.success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+
+        .alert.error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+
+        .alert.warning {
+            background: #fff3cd;
+            color: #856404;
+            border: 1px solid #ffeeba;
+        }
+
+        /* SPINNER */
+        .spinner {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border: 2px solid rgba(0,0,0,0.1);
+            border-radius: 50%;
+            border-top-color: #667eea;
+            animation: spin 0.6s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        /* RESPONSIVE */
+        @media (max-width: 768px) {
+            .container {
+                padding: 20px;
+            }
+
+            h1 {
+                font-size: 22px;
+            }
+
+            .upload-zone {
+                padding: 20px;
+            }
+
+            .results-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .button-group {
+                flex-direction: column;
+            }
+
+            .btn {
+                width: 100%;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>📄 Загрузка и обработка PDF</h1>
+        <p class="subtitle">Загружайте несколько PDF файлов, система автоматически извлечет текст с использованием лучшего метода</p>
+
+        <!-- UPLOAD ZONE -->
+        <div class="upload-zone" id="uploadZone">
+            <div class="upload-zone-icon">📁</div>
+            <div class="upload-zone-title">Перетащите файлы сюда</div>
+            <div class="upload-zone-subtitle">или нажмите для выбора (максимум 20 файлов, 100MB)</div>
+            <button class="upload-zone-button">Выбрать файлы</button>
+            <input type="file" id="fileInput" multiple accept=".pdf">
+        </div>
+
+        <!-- ALERTS -->
+        <div class="alert success" id="successAlert"></div>
+        <div class="alert error" id="errorAlert"></div>
+        <div class="alert warning" id="warningAlert"></div>
+
+        <!-- FILE LIST -->
+        <div class="file-list" id="fileList" style="display: none;">
+            <div class="file-list-title">
+                <span id="fileListCount"></span>
+            </div>
+            <div id="fileItems"></div>
+        </div>
+
+        <!-- PROGRESS -->
+        <div class="progress-container" id="progressContainer">
+            <div class="progress-title">Обработка файлов...</div>
+            <div class="progress-bar">
+                <div class="progress-fill" id="progressFill"></div>
+            </div>
+            <div class="progress-text">
+                <span id="progressText">0%</span>
+            </div>
+        </div>
+
+        <!-- BUTTONS -->
+        <div class="button-group">
+            <button class="btn btn-primary" id="uploadBtn" style="display: none;">
+                <span class="spinner" style="display: none;"></span>
+                Обработать файлы
+            </button>
+            <button class="btn btn-secondary" id="clearBtn" style="display: none;">Очистить список</button>
+        </div>
+
+        <!-- RESULTS -->
+        <div class="results" id="results">
+            <div class="results-title">✅ Результаты обработки</div>
+            <div class="results-grid" id="resultsGrid"></div>
+            <div id="resultDetails"></div>
+        </div>
+    </div>
+
+    <script>
+        const uploadZone = document.getElementById('uploadZone');
+        const fileInput = document.getElementById('fileInput');
+        const fileList = document.getElementById('fileList');
+        const fileItems = document.getElementById('fileItems');
+        const uploadBtn = document.getElementById('uploadBtn');
+        const clearBtn = document.getElementById('clearBtn');
+        const results = document.getElementById('results');
+        const progressContainer = document.getElementById('progressContainer');
+        const successAlert = document.getElementById('successAlert');
+        const errorAlert = document.getElementById('errorAlert');
+        const warningAlert = document.getElementById('warningAlert');
+
+        let selectedFiles = [];
+
+        // DRAG AND DROP
+        uploadZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadZone.classList.add('dragover');
+        });
+
+        uploadZone.addEventListener('dragleave', () => {
+            uploadZone.classList.remove('dragover');
+        });
+
+        uploadZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadZone.classList.remove('dragover');
+            handleFiles(e.dataTransfer.files);
+        });
+
+        uploadZone.addEventListener('click', () => fileInput.click());
+
+        fileInput.addEventListener('change', (e) => {
+            handleFiles(e.target.files);
+        });
+
+        function handleFiles(files) {
+            selectedFiles = Array.from(files);
+            displayFileList();
+            updateUI();
+        }
+
+        function displayFileList() {
+            fileItems.innerHTML = '';
+
+            selectedFiles.forEach((file, index) => {
+                const fileItem = document.createElement('div');
+                fileItem.className = 'file-item';
+                fileItem.innerHTML = `
+                    <div class="file-icon">📄</div>
+                    <div class="file-info">
+                        <div class="file-name">${file.name}</div>
+                        <div class="file-size">${(file.size / 1024).toFixed(2)} KB</div>
+                    </div>
+                    <div class="file-status">Готово</div>
+                    <button class="file-remove" onclick="removeFile(${index})">✕</button>
+                `;
+                fileItems.appendChild(fileItem);
+            });
+
+            const count = selectedFiles.length;
+            document.getElementById('fileListCount').textContent = `${count} файл${count === 1 ? '' : 'ов'}`;
+        }
+
+        function removeFile(index) {
+            selectedFiles.splice(index, 1);
+            displayFileList();
+            updateUI();
+        }
+
+        function updateUI() {
+            const hasFiles = selectedFiles.length > 0;
+            fileList.style.display = hasFiles ? 'block' : 'none';
+            uploadBtn.style.display = hasFiles ? 'flex' : 'none';
+            clearBtn.style.display = hasFiles ? 'block' : 'none';
+        }
+
+        uploadBtn.addEventListener('click', async () => {
+            await uploadAndProcess();
+        });
+
+        clearBtn.addEventListener('click', () => {
+            selectedFiles = [];
+            displayFileList();
+            updateUI();
+            results.classList.remove('show');
+        });
+
+        async function uploadAndProcess() {
+            const formData = new FormData();
+            selectedFiles.forEach(file => {
+                formData.append('files', file);
+            });
+
+            uploadBtn.disabled = true;
+            const spinner = uploadBtn.querySelector('.spinner');
+            spinner.style.display = 'inline-block';
+            progressContainer.classList.add('show');
+            hideAlerts();
+
+            try {
+                const response = await fetch('/api/batch-upload', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const data = await response.json();
+
+                if (data.status === 'success') {
+                    displayResults(data);
+                    showAlert('successAlert', `✅ Обработано ${data.report.successful} из ${data.report.total} файлов`);
+                } else {
+                    showAlert('errorAlert', `❌ Ошибка: ${data.message}`);
+                }
+
+                if (data.errors && data.errors.length > 0) {
+                    showAlert('warningAlert', `⚠️ ${data.errors.length} ошибок валидации`);
+                }
+            } catch (error) {
+                showAlert('errorAlert', `❌ Ошибка загрузки: ${error.message}`);
+            } finally {
+                uploadBtn.disabled = false;
+                spinner.style.display = 'none';
+                progressContainer.classList.remove('show');
+            }
+        }
+
+        function displayResults(data) {
+            const report = data.report;
+
+            // GRID WITH STATS
+            const resultsGrid = document.getElementById('resultsGrid');
+            resultsGrid.innerHTML = `
+                <div class="result-card success">
+                    <div class="result-card-number">${report.successful}</div>
+                    <div class="result-card-label">Успешно</div>
+                </div>
+                <div class="result-card error">
+                    <div class="result-card-number">${report.failed}</div>
+                    <div class="result-card-label">Ошибок</div>
+                </div>
+                <div class="result-card">
+                    <div class="result-card-number">${report.success_rate.toFixed(0)}%</div>
+                    <div class="result-card-label">Успешность</div>
+                </div>
+                <div class="result-card">
+                    <div class="result-card-number">${report.summary.avg_confidence.toFixed(0)}%</div>
+                    <div class="result-card-label">Уверенность</div>
+                </div>
+            `;
+
+            // FILE DETAILS
+            let details = '<div style="margin-top: 20px;">';
+            report.files.forEach(file => {
+                const icon = file.status === 'success' ? '✅' : '❌';
+                const method = file.method || 'N/A';
+                details += `
+                    <div style="background: white; padding: 15px; border-radius: 6px; margin-bottom: 10px;">
+                        <strong>${icon} ${file.file}</strong>
+                        <br><small style="color: #666;">Метод: ${method}, Уверенность: ${file.confidence}%</small>
+                        ${file.warnings.length > 0 ? `<br><small style="color: #dc3545;">⚠️ ${file.warnings.join(', ')}</small>` : ''}
+                    </div>
+                `;
+            });
+            details += '</div>';
+            document.getElementById('resultDetails').innerHTML = details;
+
+            results.classList.add('show');
+        }
+
+        function showAlert(alertId, message) {
+            const alert = document.getElementById(alertId);
+            alert.textContent = message;
+            alert.classList.add('show');
+            setTimeout(() => hideAlert(alertId), 5000);
+        }
+
+        function hideAlert(alertId) {
+            document.getElementById(alertId).classList.remove('show');
+        }
+
+        function hideAlerts() {
+            hideAlert('successAlert');
+            hideAlert('errorAlert');
+            hideAlert('warningAlert');
+        }
+
+        updateUI();
+    </script>
+</body>
+</html>
