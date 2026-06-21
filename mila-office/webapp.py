@@ -2206,6 +2206,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
     <footer>
       <div class="inbar">
         <input id="fileInp" type="file" accept=".txt,.md,.csv,.json,.docx,.pdf,image/*" style="display:none">
+        <input id="pdfBatchInp" type="file" accept=".pdf" multiple style="display:none">
         <button id="fileBtn" title="Прикрепить файл">📎</button>
         <div id="fileName"></div>
         <textarea id="inp" rows="1" placeholder="Напиши сообщение…"></textarea>
@@ -2249,7 +2250,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
     </div>
   </div>
 <script>
-let AGENTS=[], cur=null, CSRF='', activeJob=null, pendingUpload=null, currentDocId=null, activeLoadAgent=null;
+let AGENTS=[], cur=null, CSRF='', activeJob=null, pendingUpload=null, pendingBatchPDF=null, currentDocId=null, activeLoadAgent=null;
 
 async function postJSON(url, payload){
   const body=JSON.stringify(payload||{});
@@ -2788,6 +2789,26 @@ async function uploadSelectedFile(file){
   label.textContent='Файл прикреплен';
 }
 
+async function uploadBatchPDF(files){
+  if(!files || files.length===0) return;
+  const label=document.getElementById('fileName');
+  label.textContent='📤 Загружаю '+files.length+' PDF файлов...';
+  const fd=new FormData();
+  for(let f of files) fd.append('files', f);
+  let r=await fetch('/api/batch-upload',{method:'POST',headers:{'X-CSRF-Token':CSRF},body:fd});
+  if(r.status===403){
+    try{ const m=await (await fetch('/api/meta')).json(); CSRF=m.csrf; }catch(e){}
+    r=await fetch('/api/batch-upload',{method:'POST',headers:{'X-CSRF-Token':CSRF},body:fd});
+  }
+  const d=await r.json();
+  if(!r.ok || d.status!=='success'){
+    label.textContent='❌ Ошибка: '+d.message||'PDF не загрузилось';
+    return;
+  }
+  pendingBatchPDF={batch_id:d.batch_id,report:d.report,count:files.length};
+  label.textContent='✅ Загружено '+d.report.successful+'/'+d.report.total+' файлов';
+}
+
 async function handlePaste(e){
   const items=(e.clipboardData&&e.clipboardData.items)?Array.from(e.clipboardData.items):[];
   const img=items.find(it=>it.kind==='file' && it.type && it.type.startsWith('image/'));
@@ -2802,12 +2823,18 @@ async function handlePaste(e){
 
 async function send(){
   const inp=document.getElementById('inp'); const text=inp.value.trim();
-  if(!text && !pendingUpload) return;
+  if(!text && !pendingUpload && !pendingBatchPDF) return;
   if(activeJob) return;
   const upload=pendingUpload;
-  const shown=text || 'Дай фидбек по файлу';
+  const batchPDF=pendingBatchPDF;
+  const shown=text || (batchPDF ? 'Обработай '+batchPDF.count+' PDF файлов' : 'Дай фидбек по файлу');
   inp.value=''; inp.style.height='auto';
-  addMsg(upload ? (shown+'\n\nПрикреплен файл') : shown,true);
+  if(batchPDF) {
+    addMsg(shown+'\n\n✅ Загружено: '+batchPDF.report.successful+'/'+batchPDF.report.total);
+    addMsg('📊 Методы: '+JSON.stringify(batchPDF.report.summary.methods_used)+'\n💯 Уверенность: '+batchPDF.report.summary.avg_confidence.toFixed(1)+'%',false);
+  } else {
+    addMsg(upload ? (shown+'\n\nПрикреплен файл') : shown,true);
+  }
   const t=document.getElementById('typing'); t.textContent=agent().name+' печатает…'; t.style.display='block';
   document.getElementById('send').disabled=true;
   try{
@@ -2815,7 +2842,7 @@ async function send(){
     if(!r.ok){ addMsg('⚠️ Сервер вернул '+r.status+' (попробуй обновить страницу).',false);
       t.style.display='none'; document.getElementById('send').disabled=false; return; }
     const j=await r.json();
-    pendingUpload=null; document.getElementById('fileName').textContent=''; document.getElementById('fileInp').value='';
+    pendingUpload=null; pendingBatchPDF=null; document.getElementById('fileName').textContent=''; document.getElementById('fileInp').value=''; document.getElementById('pdfBatchInp').value='';
     if(j.error){ addMsg('⚠️ Ошибка: '+j.error,false); }
     else {
       // Агент думает в фоне — опрашиваем результат, пока не готов.
@@ -3073,8 +3100,15 @@ window.onload=async()=>{
   op.onclick=()=>window.open('/operator','_blank'); side.appendChild(op);
   const inp=document.getElementById('inp');
   const fileInp=document.getElementById('fileInp');
+  const pdfBatchInp=document.getElementById('pdfBatchInp');
   document.getElementById('fileBtn').onclick=()=>fileInp.click();
   fileInp.addEventListener('change',()=>uploadSelectedFile(fileInp.files[0]));
+  const pdfBatchBtn=document.createElement('button');
+  pdfBatchBtn.id='pdfBatchBtn'; pdfBatchBtn.textContent='📚 PDF'; pdfBatchBtn.title='Загрузить несколько PDF файлов';
+  pdfBatchBtn.style.cssText='position:absolute;left:60px;top:50%;transform:translateY(-50%);background:#c4614a;color:white;border:none;border-radius:50%;width:40px;height:40px;cursor:pointer;font-size:18px;';
+  document.getElementById('inp').parentElement.insertBefore(pdfBatchBtn, document.getElementById('inp'));
+  pdfBatchBtn.onclick=()=>pdfBatchInp.click();
+  pdfBatchInp.addEventListener('change',()=>uploadBatchPDF(Array.from(pdfBatchInp.files)));
   inp.addEventListener('keydown',e=>{ if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();} });
   inp.addEventListener('input',()=>{ inp.style.height='auto'; inp.style.height=Math.min(inp.scrollHeight,160)+'px'; });
   inp.addEventListener('paste',handlePaste);
