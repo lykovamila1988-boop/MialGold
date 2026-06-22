@@ -2206,7 +2206,6 @@ INDEX_HTML = r"""<!DOCTYPE html>
     <footer>
       <div class="inbar">
         <input id="fileInp" type="file" accept=".txt,.md,.csv,.json,.docx,.pdf,image/*" style="display:none">
-        <input id="pdfBatchInp" type="file" accept=".pdf" multiple style="display:none">
         <button id="fileBtn" title="Прикрепить файл">📎</button>
         <div id="fileName"></div>
         <textarea id="inp" rows="1" placeholder="Напиши сообщение…"></textarea>
@@ -2842,7 +2841,7 @@ async function send(){
     if(!r.ok){ addMsg('⚠️ Сервер вернул '+r.status+' (попробуй обновить страницу).',false);
       t.style.display='none'; document.getElementById('send').disabled=false; return; }
     const j=await r.json();
-    pendingUpload=null; pendingBatchPDF=null; document.getElementById('fileName').textContent=''; document.getElementById('fileInp').value=''; document.getElementById('pdfBatchInp').value='';
+    pendingUpload=null; pendingBatchPDF=null; document.getElementById('fileName').textContent=''; document.getElementById('fileInp').value='';
     if(j.error){ addMsg('⚠️ Ошибка: '+j.error,false); }
     else {
       // Агент думает в фоне — опрашиваем результат, пока не готов.
@@ -3100,15 +3099,22 @@ window.onload=async()=>{
   op.onclick=()=>window.open('/operator','_blank'); side.appendChild(op);
   const inp=document.getElementById('inp');
   const fileInp=document.getElementById('fileInp');
-  const pdfBatchInp=document.getElementById('pdfBatchInp');
+  fileInp.setAttribute('multiple', 'multiple');
   document.getElementById('fileBtn').onclick=()=>fileInp.click();
-  fileInp.addEventListener('change',()=>uploadSelectedFile(fileInp.files[0]));
-  const pdfBatchBtn=document.createElement('button');
-  pdfBatchBtn.id='pdfBatchBtn'; pdfBatchBtn.textContent='📚 PDF'; pdfBatchBtn.title='Загрузить несколько PDF файлов';
-  pdfBatchBtn.style.cssText='position:absolute;left:60px;top:50%;transform:translateY(-50%);background:#c4614a;color:white;border:none;border-radius:50%;width:40px;height:40px;cursor:pointer;font-size:18px;';
-  document.getElementById('inp').parentElement.insertBefore(pdfBatchBtn, document.getElementById('inp'));
-  pdfBatchBtn.onclick=()=>pdfBatchInp.click();
-  pdfBatchInp.addEventListener('change',()=>uploadBatchPDF(Array.from(pdfBatchInp.files)));
+  fileInp.addEventListener('change',()=>{
+    const files=Array.from(fileInp.files);
+    if(files.length===0) return;
+    // Если выбраны только PDF файлы и больше одного — используем batch
+    const allPDF=files.every(f=>f.name.toLowerCase().endsWith('.pdf'));
+    if(allPDF && files.length>1){
+      uploadBatchPDF(files);
+    } else if(files.length>1){
+      // Если смешанные файлы — обработать как несколько одиночных
+      uploadSelectedFile(files[0]);
+    } else {
+      uploadSelectedFile(files[0]);
+    }
+  });
   inp.addEventListener('keydown',e=>{ if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();} });
   inp.addEventListener('input',()=>{ inp.style.height='auto'; inp.style.height=Math.min(inp.scrollHeight,160)+'px'; });
   inp.addEventListener('paste',handlePaste);
