@@ -53,6 +53,7 @@ import document_manager
 import upload_handler
 import batch_upload_handler
 import workbook_manager
+import workbook_batch_loader
 
 # ─── Логирование ─────────────────────────────────────────
 # Полный traceback пишем в файл, клиенту отдаём безопасное сообщение.
@@ -2174,6 +2175,54 @@ def api_workbook_delete(workbook_id):
     return jsonify({"error": "Workbook not found"}), 404
 
 
+# ─── WORKBOOK BATCH LOADER ───────────────────────────────────────
+@app.get("/api/workbook/batch/info")
+def api_workbook_batch_info():
+    """Get info about workbook folder."""
+    info = workbook_batch_loader.get_workbook_info()
+    return jsonify(info)
+
+
+@app.post("/api/workbook/batch/prepare")
+def api_workbook_batch_prepare():
+    """Prepare batch of PNG files for analysis."""
+    data = request.get_json() or {}
+    custom_prompt = data.get("prompt")
+
+    result = workbook_batch_loader.prepare_batch_analysis(custom_prompt)
+    return jsonify(result)
+
+
+@app.post("/api/workbook/batch/analyse")
+def api_workbook_batch_analyse():
+    """Request analysis from Victoria (or other agent)."""
+    data = request.get_json() or {}
+    agent = data.get("agent", "victoria").lower()
+    custom_prompt = data.get("prompt")
+
+    # Prepare batch
+    batch_info = workbook_batch_loader.prepare_batch_analysis(custom_prompt)
+
+    if not batch_info.get("ok"):
+        return jsonify(batch_info), 400
+
+    # Format request for agent
+    request_text = workbook_batch_loader.format_analysis_request(
+        batch_info["files"],
+        batch_info["prompt"]
+    )
+
+    return jsonify({
+        "ok": True,
+        "agent": agent,
+        "total_pages": batch_info["total_pages"],
+        "request_text": request_text,
+        "prompt": batch_info["prompt"],
+        "files": batch_info["file_list"],
+        "next_step": f"Send this request_text to /api/chat with agent='{agent}'"
+    })
+
+
 @app.post("/api/agent-message")
 def api_agent_message():
     """Сохранить сообщение от пользователя или агента в историю."""
@@ -2906,6 +2955,10 @@ async function renderAgent(){
       });
     } else {
       drawMsg(a.intro, false);
+      // Show special button for Victoria (workbook analysis)
+      if(k === 'victoria') {
+        setTimeout(() => showWorkbookAnalysisOption(), 500);
+      }
     }
   } catch(e) {
     console.error('renderAgent failed:', e);
@@ -2921,6 +2974,87 @@ async function renderAgent(){
     }
   } finally {
     activeLoadAgent = null;
+  }
+}
+
+function showWorkbookAnalysisOption(){
+  const chat = document.getElementById('chat');
+  if(!chat) return;
+
+  const row = document.createElement('div');
+  row.className = 'row';
+
+  const av = document.createElement('div');
+  av.className = 'av';
+  av.textContent = '📖';
+  av.style.background = '#c4614a';
+
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+  bubble.style.background = '#fffbf7';
+  bubble.style.borderLeft = '4px solid #c4614a';
+
+  const title = document.createElement('strong');
+  title.textContent = '📚 Анализ рабочей тетради';
+  title.style.display = 'block';
+  title.style.marginBottom = '10px';
+
+  const desc = document.createElement('div');
+  desc.textContent = 'Хочешь, я проанализирую твою тетрадь "Когда любовь становится зеркалом" (61 страница) на предмет целевой аудитории, ценности и потенциала продаж?';
+  desc.style.marginBottom = '12px';
+  desc.style.fontSize = '14px';
+  desc.style.color = '#555';
+
+  const btn = document.createElement('button');
+  btn.className = 'docLinkBtn';
+  btn.style.background = '#c4614a';
+  btn.style.color = 'white';
+  btn.textContent = '✅ Проанализировать тетрадь';
+  btn.onclick = loadWorkbookForAnalysis;
+
+  bubble.appendChild(title);
+  bubble.appendChild(desc);
+  bubble.appendChild(btn);
+
+  row.appendChild(av);
+  row.appendChild(bubble);
+  chat.appendChild(row);
+}
+
+async function loadWorkbookForAnalysis(){
+  try {
+    document.querySelector('.docLinkBtn').disabled = true;
+    document.querySelector('.docLinkBtn').textContent = '⏳ Загружаю...';
+
+    const response = await fetch('/api/workbook/batch/prepare', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        prompt: 'это моя тетрадь на продажу проверь подходит ли она к моей целевой аудитории для кого она что она даст немного ли там чего то и скажи если что то нужно исправить добавить или убрать'
+      })
+    });
+
+    const data = await response.json();
+
+    if(!data.ok){
+      alert('Ошибка: ' + data.error);
+      return;
+    }
+
+    // Send analysis request to Victoria
+    const inp = document.getElementById('inp');
+    inp.value = data.request_text;
+    inp.style.height = 'auto';
+    inp.style.height = Math.min(inp.scrollHeight, 160) + 'px';
+
+    addMsg('📚 Загружаю анализ рабочей тетради (61 страница)...', true);
+
+    // Auto-send after short delay
+    setTimeout(send, 500);
+
+  } catch(error) {
+    console.error('Failed to load workbook:', error);
+    alert('Ошибка загрузки тетради: ' + error.message);
   }
 }
 
