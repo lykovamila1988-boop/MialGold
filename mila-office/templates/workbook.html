@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>📖 Workbook Manager</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 40px;
+            color: #2c3e50;
+        }
+
+        .header h1 {
+            font-size: 48px;
+            margin-bottom: 10px;
+        }
+
+        .header p {
+            font-size: 16px;
+            color: #7f8c8d;
+        }
+
+        .main-layout {
+            display: grid;
+            grid-template-columns: 1fr 2fr;
+            gap: 30px;
+            margin-bottom: 40px;
+        }
+
+        .panel {
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.1);
+            padding: 30px;
+        }
+
+        .panel h2 {
+            font-size: 24px;
+            margin-bottom: 20px;
+            color: #2c3e50;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .workbooks-list {
+            list-style: none;
+        }
+
+        .workbook-item {
+            padding: 15px;
+            margin-bottom: 10px;
+            background: #f8f9fa;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.3s;
+            border-left: 4px solid #c4614a;
+        }
+
+        .workbook-item:hover {
+            background: #f0f0f0;
+            transform: translateX(5px);
+        }
+
+        .workbook-item.active {
+            background: #c4614a;
+            color: white;
+            border-left-color: #8b3a2a;
+        }
+
+        .workbook-title {
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+
+        .workbook-meta {
+            font-size: 12px;
+            opacity: 0.7;
+            display: flex;
+            gap: 15px;
+        }
+
+        .button {
+            display: inline-block;
+            padding: 10px 20px;
+            background: #c4614a;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.3s;
+        }
+
+        .button:hover {
+            background: #a84a37;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(196, 97, 74, 0.3);
+        }
+
+        .button-secondary {
+            background: #95a5a6;
+        }
+
+        .button-secondary:hover {
+            background: #7f8c8d;
+        }
+
+        .button-group {
+            display: flex;
+            gap: 10px;
+            margin-top: 20px;
+            flex-wrap: wrap;
+        }
+
+        .editor-panel {
+            display: none;
+        }
+
+        .editor-panel.active {
+            display: block;
+        }
+
+        .editor-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding-bottom: 15px;
+            border-bottom: 2px solid #eee;
+        }
+
+        .editor-title {
+            font-size: 28px;
+            color: #2c3e50;
+        }
+
+        .status-badge {
+            display: inline-block;
+            padding: 6px 12px;
+            background: #27ae60;
+            color: white;
+            border-radius: 20px;
+            font-size: 12px;
+        }
+
+        .status-badge.draft {
+            background: #3498db;
+        }
+
+        .status-badge.editing {
+            background: #f39c12;
+        }
+
+        .status-badge.reviewing {
+            background: #e74c3c;
+        }
+
+        .metadata {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 15px;
+            margin-bottom: 20px;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 8px;
+        }
+
+        .meta-item {
+            text-align: center;
+        }
+
+        .meta-value {
+            font-size: 24px;
+            font-weight: bold;
+            color: #c4614a;
+        }
+
+        .meta-label {
+            font-size: 12px;
+            color: #7f8c8d;
+            text-transform: uppercase;
+            margin-top: 5px;
+        }
+
+        textarea {
+            width: 100%;
+            min-height: 300px;
+            padding: 15px;
+            border: 2px solid #ddd;
+            border-radius: 8px;
+            font-family: 'Monaco', 'Courier New', monospace;
+            font-size: 14px;
+            resize: vertical;
+        }
+
+        textarea:focus {
+            outline: none;
+            border-color: #c4614a;
+            box-shadow: 0 0 0 3px rgba(196, 97, 74, 0.1);
+        }
+
+        .toolbar {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 15px;
+            flex-wrap: wrap;
+        }
+
+        .agent-selector {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 15px;
+        }
+
+        .agent-btn {
+            padding: 8px 16px;
+            background: #ecf0f1;
+            border: 2px solid transparent;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 500;
+            transition: all 0.3s;
+        }
+
+        .agent-btn.active {
+            background: #c4614a;
+            color: white;
+            border-color: #8b3a2a;
+        }
+
+        .versions-list {
+            max-height: 300px;
+            overflow-y: auto;
+            margin-top: 15px;
+        }
+
+        .version-item {
+            padding: 10px;
+            margin-bottom: 8px;
+            background: #f8f9fa;
+            border-radius: 6px;
+            font-size: 13px;
+            border-left: 3px solid #c4614a;
+        }
+
+        .version-time {
+            color: #7f8c8d;
+            font-size: 11px;
+        }
+
+        .analytics-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 15px;
+            margin-top: 20px;
+        }
+
+        .analytics-item {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 8px;
+            text-align: center;
+        }
+
+        .analytics-score {
+            font-size: 28px;
+            font-weight: bold;
+            color: #c4614a;
+        }
+
+        .analytics-label {
+            font-size: 12px;
+            color: #7f8c8d;
+            margin-top: 5px;
+            text-transform: uppercase;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 40px;
+            color: #7f8c8d;
+        }
+
+        .empty-state-icon {
+            font-size: 64px;
+            margin-bottom: 20px;
+            opacity: 0.3;
+        }
+
+        @media (max-width: 768px) {
+            .main-layout {
+                grid-template-columns: 1fr;
+            }
+
+            .metadata {
+                grid-template-columns: 1fr;
+            }
+
+            .analytics-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📖 Workbook Manager</h1>
+            <p>Создавай, редактируй, анализируй и публикуй свои рабочие тетради</p>
+        </div>
+
+        <div class="main-layout">
+            <!-- LEFT: Workbook List -->
+            <div class="panel">
+                <h2>📚 Мои Тетради</h2>
+
+                <button class="button" onclick="showCreateModal()">+ Новая тетрадь</button>
+
+                <ul id="workbooksList" class="workbooks-list">
+                    <li class="empty-state">
+                        <div class="empty-state-icon">📄</div>
+                        <p>Нет тетрадей. Создайте новую!</p>
+                    </li>
+                </ul>
+            </div>
+
+            <!-- RIGHT: Editor Panel -->
+            <div id="editorPanel" class="editor-panel panel">
+                <div class="empty-state">
+                    <div class="empty-state-icon">✍️</div>
+                    <p>Выберите тетрадь чтобы начать редактировать</p>
+                </div>
+
+                <div id="editorContent" style="display: none;">
+                    <div class="editor-header">
+                        <div>
+                            <h2 id="editorTitle" class="editor-title">Untitled</h2>
+                            <span id="statusBadge" class="status-badge">draft</span>
+                        </div>
+                    </div>
+
+                    <div class="metadata">
+                        <div class="meta-item">
+                            <div class="meta-value" id="wordCount">0</div>
+                            <div class="meta-label">Слов</div>
+                        </div>
+                        <div class="meta-item">
+                            <div class="meta-value" id="editCount">0</div>
+                            <div class="meta-label">Редакций</div>
+                        </div>
+                        <div class="meta-item">
+                            <div class="meta-value" id="contributors">—</div>
+                            <div class="meta-label">Авторов</div>
+                        </div>
+                    </div>
+
+                    <div class="toolbar">
+                        <label for="agentSelect" style="align-self: center; margin-right: 10px;">Агент:</label>
+                        <select id="agentSelect">
+                            <option value="">Пользователь</option>
+                            <option value="victoria">🎨 Виктория (Редактор)</option>
+                            <option value="marina">📱 Марина (Маркетинг)</option>
+                            <option value="alina">💎 Алина (UX)</option>
+                        </select>
+                    </div>
+
+                    <div style="margin-bottom: 15px;">
+                        <label for="editNotes">Заметка (опционально):</label>
+                        <input type="text" id="editNotes" placeholder="Описание этого редактирования..." style="width: 100%; padding: 8px; margin-top: 5px; border: 1px solid #ddd; border-radius: 4px;">
+                    </div>
+
+                    <textarea id="contentEditor" placeholder="Начните писать..."></textarea>
+
+                    <div class="button-group">
+                        <button class="button" onclick="saveVersion()">💾 Сохранить версию</button>
+                        <button class="button button-secondary" onclick="requestAnalysis()">📊 Запросить анализ</button>
+                        <button class="button button-secondary" onclick="showVersions()">📜 История версий</button>
+                        <button class="button button-secondary" onclick="exportWorkbook()">⬇️ Скачать</button>
+                    </div>
+
+                    <div id="analyticsSection"></div>
+
+                    <div id="versionsSection" style="display: none; margin-top: 30px;">
+                        <h3 style="margin-bottom: 15px;">📜 История версий</h3>
+                        <div id="versionsList" class="versions-list"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentWorkbookId = null;
+        let workbooks = [];
+
+        async function loadWorkbooks() {
+            try {
+                const response = await fetch('/api/workbooks');
+                const data = await response.json();
+                workbooks = data.workbooks || [];
+                renderWorkbooksList();
+            } catch (error) {
+                console.error('Failed to load workbooks:', error);
+            }
+        }
+
+        function renderWorkbooksList() {
+            const list = document.getElementById('workbooksList');
+
+            if (workbooks.length === 0) {
+                list.innerHTML = '<li class="empty-state"><div class="empty-state-icon">📄</div><p>Нет тетрадей</p></li>';
+                return;
+            }
+
+            list.innerHTML = workbooks.map(wb => `
+                <li class="workbook-item ${wb.workbook_id === currentWorkbookId ? 'active' : ''}" onclick="selectWorkbook('${wb.workbook_id}')">
+                    <div class="workbook-title">${wb.title}</div>
+                    <div class="workbook-meta">
+                        <span>✏️ ${wb.edits} редакций</span>
+                        <span>📝 ${wb.word_count} слов</span>
+                        <span>👥 ${wb.contributors.length} авторов</span>
+                    </div>
+                </li>
+            `).join('');
+        }
+
+        async function selectWorkbook(workbookId) {
+            currentWorkbookId = workbookId;
+            renderWorkbooksList();
+
+            try {
+                const response = await fetch(`/api/workbook/${workbookId}`);
+                const wb = await response.json();
+
+                document.getElementById('editorPanel').classList.add('active');
+                document.getElementById('editorContent').style.display = 'block';
+                document.getElementById('editorPanel').querySelector('.empty-state').style.display = 'none';
+
+                document.getElementById('editorTitle').textContent = wb.title;
+                document.getElementById('statusBadge').textContent = wb.status;
+                document.getElementById('statusBadge').className = `status-badge ${wb.status}`;
+                document.getElementById('wordCount').textContent = wb.metadata.word_count;
+                document.getElementById('editCount').textContent = wb.metadata.total_edits;
+                document.getElementById('contributors').textContent = wb.metadata.contributors.length > 0 ? wb.metadata.contributors.join(', ') : '—';
+                document.getElementById('contentEditor').value = wb.content;
+
+                renderAnalytics(wb.analytics);
+            } catch (error) {
+                console.error('Failed to load workbook:', error);
+            }
+        }
+
+        async function saveVersion() {
+            if (!currentWorkbookId) return;
+
+            const content = document.getElementById('contentEditor').value;
+            const notes = document.getElementById('editNotes').value;
+            const agent = document.getElementById('agentSelect').value;
+
+            try {
+                const response = await fetch(`/api/workbook/${currentWorkbookId}/edit`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ content, notes, agent: agent || undefined })
+                });
+
+                const result = await response.json();
+                if (result.ok) {
+                    alert(`✅ Версия ${result.version_id} сохранена!`);
+                    document.getElementById('editNotes').value = '';
+                    loadWorkbooks();
+                    selectWorkbook(currentWorkbookId);
+                }
+            } catch (error) {
+                console.error('Failed to save version:', error);
+            }
+        }
+
+        async function requestAnalysis() {
+            if (!currentWorkbookId) return;
+            alert('📊 Анализ будет выполнен агентом');
+            // TODO: Integrate with agent analysis
+        }
+
+        async function showVersions() {
+            if (!currentWorkbookId) return;
+
+            try {
+                const response = await fetch(`/api/workbook/${currentWorkbookId}/versions`);
+                const data = await response.json();
+
+                const versionsSection = document.getElementById('versionsSection');
+                const versionsList = document.getElementById('versionsList');
+
+                versionsSection.style.display = 'block';
+                versionsList.innerHTML = data.versions.map(v => `
+                    <div class="version-item">
+                        <strong>${v.version_id}</strong> · ${v.editor}
+                        <div class="version-time">${v.timestamp}</div>
+                        ${v.notes ? `<div>📝 ${v.notes}</div>` : ''}
+                        <div>📊 ${v.word_count} слов</div>
+                    </div>
+                `).join('');
+            } catch (error) {
+                console.error('Failed to load versions:', error);
+            }
+        }
+
+        function renderAnalytics(analytics) {
+            const section = document.getElementById('analyticsSection');
+            if (!analytics || Object.keys(analytics).length === 0) {
+                section.innerHTML = '';
+                return;
+            }
+
+            section.innerHTML = '<h3 style="margin: 30px 0 15px 0;">📊 Анализ</h3>';
+            section.innerHTML += '<div class="analytics-grid">' +
+                Object.entries(analytics).map(([agent, data]) => `
+                    <div class="analytics-item">
+                        <div class="analytics-score">${data.result?.score || '—'}</div>
+                        <div class="analytics-label">${agent}</div>
+                    </div>
+                `).join('') +
+            '</div>';
+        }
+
+        async function exportWorkbook() {
+            if (!currentWorkbookId) return;
+
+            const format = prompt('Формат (txt/json/md)?', 'txt');
+            if (!format) return;
+
+            try {
+                const response = await fetch(`/api/workbook/${currentWorkbookId}/export/${format}`);
+                const blob = await response.blob();
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `workbook.${format}`;
+                a.click();
+            } catch (error) {
+                console.error('Failed to export:', error);
+            }
+        }
+
+        function showCreateModal() {
+            const title = prompt('Название новой тетради:', 'Моя новая тетрадь');
+            if (!title) return;
+
+            fetch('/api/workbook/create', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ title })
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.ok) {
+                    loadWorkbooks();
+                    selectWorkbook(data.workbook_id);
+                }
+            })
+            .catch(e => console.error('Failed:', e));
+        }
+
+        // Load on startup
+        loadWorkbooks();
+    </script>
+</body>
+</html>

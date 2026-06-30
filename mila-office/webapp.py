@@ -52,6 +52,7 @@ import webapp_utils
 import document_manager
 import upload_handler
 import batch_upload_handler
+import workbook_manager
 
 # ─── Логирование ─────────────────────────────────────────
 # Полный traceback пишем в файл, клиенту отдаём безопасное сообщение.
@@ -1815,6 +1816,21 @@ def operator_page():
     return Response(OPERATOR_HTML, mimetype="text/html")
 
 
+@app.get("/workbook")
+def workbook_page():
+    """Workbook management interface."""
+    try:
+        workbook_html_path = Path(__file__).parent / "templates" / "workbook.html"
+        if workbook_html_path.exists():
+            content = workbook_html_path.read_text(encoding="utf-8")
+            return Response(content, mimetype="text/html")
+        else:
+            return "Страница workbook не найдена", 404
+    except Exception as e:
+        logger.error(f"Error loading workbook page: {e}")
+        return "Ошибка загрузки страницы workbook", 500
+
+
 @app.get("/batch-upload")
 def batch_upload_page():
     """Страница для batch загрузки PDF файлов."""
@@ -2014,6 +2030,148 @@ def api_document_export(doc_id: str):
                        mimetype="application/json")
     response.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
     return response
+
+
+# ─── WORKBOOK API ROUTES ──────────────────────────────────────
+@app.post("/api/workbook/create")
+def api_workbook_create():
+    """Create new workbook."""
+    data = request.get_json() or {}
+    title = data.get("title", "Untitled Workbook")
+    content = data.get("content", "")
+
+    wb = workbook_manager.WorkbookManager.create(title, content)
+    return jsonify({
+        "ok": True,
+        "workbook_id": wb.workbook_id,
+        "title": wb.data["title"],
+        "url": f"/workbook/{wb.workbook_id}"
+    })
+
+
+@app.get("/api/workbook/<workbook_id>")
+def api_workbook_get(workbook_id):
+    """Get workbook details."""
+    wb = workbook_manager.WorkbookManager.get(workbook_id)
+    if not wb:
+        return jsonify({"error": "Workbook not found"}), 404
+
+    return jsonify(wb.to_dict())
+
+
+@app.post("/api/workbook/<workbook_id>/edit")
+def api_workbook_edit(workbook_id):
+    """Edit workbook (add version)."""
+    wb = workbook_manager.WorkbookManager.get(workbook_id)
+    if not wb:
+        return jsonify({"error": "Workbook not found"}), 404
+
+    data = request.get_json() or {}
+    content = data.get("content", "")
+    editor = data.get("editor", "user")
+    notes = data.get("notes", "")
+    agent = data.get("agent")  # victoria, marina, alina
+
+    if agent:
+        agent = workbook_manager.AgentType[agent.upper()]
+
+    version_id = wb.add_version(content, editor, notes, agent)
+    workbook_manager.WorkbookManager.update_word_count(workbook_id)
+
+    return jsonify({
+        "ok": True,
+        "version_id": version_id,
+        "word_count": len(content.split())
+    })
+
+
+@app.get("/api/workbook/<workbook_id>/versions")
+def api_workbook_versions(workbook_id):
+    """Get version history."""
+    wb = workbook_manager.WorkbookManager.get(workbook_id)
+    if not wb:
+        return jsonify({"error": "Workbook not found"}), 404
+
+    versions = []
+    for v in wb.data["versions"]:
+        versions.append({
+            "version_id": v["version_id"],
+            "timestamp": v["timestamp"],
+            "editor": v["editor"],
+            "notes": v.get("notes", ""),
+            "word_count": v["word_count"]
+        })
+
+    return jsonify({"versions": versions})
+
+
+@app.post("/api/workbook/<workbook_id>/analyse")
+def api_workbook_analyse(workbook_id):
+    """Store analysis from agent."""
+    wb = workbook_manager.WorkbookManager.get(workbook_id)
+    if not wb:
+        return jsonify({"error": "Workbook not found"}), 404
+
+    data = request.get_json() or {}
+    agent = data.get("agent", "victoria").upper()
+    analysis = data.get("analysis", {})
+
+    try:
+        agent_enum = workbook_manager.AgentType[agent]
+        wb.analyse(analysis, agent_enum)
+        return jsonify({"ok": True, "agent": agent})
+    except KeyError:
+        return jsonify({"error": f"Unknown agent: {agent}"}), 400
+
+
+@app.get("/api/workbook/<workbook_id>/export/<format>")
+def api_workbook_export(workbook_id, format):
+    """Export workbook in format (txt/json/md)."""
+    wb = workbook_manager.WorkbookManager.get(workbook_id)
+    if not wb:
+        return jsonify({"error": "Workbook not found"}), 404
+
+    content = workbook_manager.WorkbookManager.export(workbook_id, format)
+    if not content:
+        return jsonify({"error": f"Unknown format: {format}"}), 400
+
+    filename = f"{wb.data['title'].replace(' ', '_')}.{format}"
+    response = Response(content, mimetype="text/plain" if format == "txt" else "application/json")
+    response.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+    return response
+
+
+@app.get("/api/workbooks")
+def api_workbooks_list():
+    """List all workbooks."""
+    workbooks = workbook_manager.WorkbookManager.list_all()
+    return jsonify({"workbooks": workbooks})
+
+
+@app.post("/api/workbook/<workbook_id>/images")
+def api_workbook_add_images(workbook_id):
+    """Add images (PNG pages) to workbook."""
+    wb = workbook_manager.WorkbookManager.get(workbook_id)
+    if not wb:
+        return jsonify({"error": "Workbook not found"}), 404
+
+    data = request.get_json() or {}
+    image_paths = data.get("images", [])
+
+    added = wb.add_images(image_paths)
+    return jsonify({
+        "ok": True,
+        "added": added,
+        "total_pages": len(wb.data["images"])
+    })
+
+
+@app.delete("/api/workbook/<workbook_id>")
+def api_workbook_delete(workbook_id):
+    """Delete workbook."""
+    if workbook_manager.WorkbookManager.delete(workbook_id):
+        return jsonify({"ok": True})
+    return jsonify({"error": "Workbook not found"}), 404
 
 
 @app.post("/api/agent-message")
