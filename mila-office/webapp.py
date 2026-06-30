@@ -2956,7 +2956,7 @@ async function renderAgent(){
     } else {
       drawMsg(a.intro, false);
       // Show special button for Victoria (workbook analysis)
-      if(k === 'victoria') {
+      if(cur === 'victoria') {
         setTimeout(() => showWorkbookAnalysisOption(), 500);
       }
     }
