@@ -228,7 +228,7 @@ MAX_JOBS = 200           # бэкстоп против утечки незабр
 MAX_HISTORY_MSGS = 40    # ~20 последних реплик user/assistant на агента (защита памяти/токенов)
 
 MAX_UPLOADS = 80
-MAX_UPLOAD_BYTES = 12 * 1024 * 1024
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50MB для больших PDF файлов
 MAX_EXTRACTED_CHARS = 30000
 _DOCUMENTS_DIR = base.MILA_FOLDER / "reports" / "documents"
 _DOCUMENTS_DIR.mkdir(parents=True, exist_ok=True)
